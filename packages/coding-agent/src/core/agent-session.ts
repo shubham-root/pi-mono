@@ -229,6 +229,10 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
+	// Event processing queue to ensure events are emitted to listeners in order
+	private _eventQueue: AgentEvent[] = [];
+	private _processingEvent = false;
+
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
