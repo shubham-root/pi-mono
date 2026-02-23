@@ -42,6 +42,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { streamOpenAICompletions, streamSimpleOpenAICompletions } from "./openai-completions.js";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -59,11 +60,167 @@ export interface BedrockOptions extends StreamOptions {
 
 type Block = (TextContent | ThinkingContent | ToolCall) & { index?: number; partialJson?: string };
 
+/**
+ * Check if a Bedrock model is a Moonshot/Kimi model.
+ * These models have known tool call parsing bugs with the Converse API
+ * (see vercel/ai#11409) and must be routed through bedrock-mantle instead.
+ */
+function isMoonshotModel(modelId: string): boolean {
+	const lower = modelId.toLowerCase();
+	return lower.includes("kimi") || lower.includes("moonshot");
+}
+
+/**
+ * Build an OpenAI-compatible model descriptor pointing to bedrock-mantle
+ * for Moonshot/Kimi models on Bedrock.
+ */
+function buildMantleModel(model: Model<"bedrock-converse-stream">, region: string): Model<"openai-completions"> {
+	return {
+		id: model.id,
+		name: model.name,
+		api: "openai-completions",
+		provider: "amazon-bedrock",
+		baseUrl: `https://bedrock-mantle.${region}.api.aws/v1`,
+		reasoning: model.reasoning,
+		input: model.input,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		compat: {
+			// bedrock-mantle speaks standard OpenAI protocol
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		},
+	};
+}
+
+/**
+ * Get the API key for bedrock-mantle authentication.
+ * Uses AWS_BEARER_TOKEN_BEDROCK for bearer token auth,
+ * or falls back to IAM credential-based SigV4 signing via a custom fetch wrapper.
+ */
+function getMantleApiKey(): string | undefined {
+	if (typeof process !== "undefined") {
+		return process.env.AWS_BEARER_TOKEN_BEDROCK;
+	}
+	return undefined;
+}
+
+/**
+ * Resolve the AWS region for bedrock-mantle from options or environment.
+ */
+function getMantleRegion(options?: { region?: string }): string {
+	if (options?.region) return options.region;
+	if (typeof process !== "undefined") {
+		return process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
+	}
+	return "us-east-1";
+}
+
+/**
+ * Route a Moonshot/Kimi model through bedrock-mantle OpenAI-compatible endpoint.
+ * Returns the event stream from the OpenAI completions provider.
+ */
+function streamViaMantleSimple(
+	model: Model<"bedrock-converse-stream">,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const region = getMantleRegion(options as BedrockOptions | undefined);
+	const mantleModel = buildMantleModel(model, region);
+	const apiKey = getMantleApiKey();
+	if (!apiKey) {
+		const errorStream = new AssistantMessageEventStream();
+		const errorMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "bedrock-converse-stream",
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage:
+				"AWS_BEARER_TOKEN_BEDROCK is required for Kimi/Moonshot models on Bedrock. " +
+				"These models use bedrock-mantle (OpenAI-compatible endpoint) which requires bearer token authentication.",
+			timestamp: Date.now(),
+		};
+		errorStream.push({ type: "error", reason: "error", error: errorMsg });
+		errorStream.end();
+		return errorStream;
+	}
+	return streamSimpleOpenAICompletions(mantleModel, context, { ...options, apiKey });
+}
+
+/**
+ * Route a Moonshot/Kimi model through bedrock-mantle OpenAI-compatible endpoint
+ * with provider-specific options.
+ */
+function streamViaMantle(
+	model: Model<"bedrock-converse-stream">,
+	context: Context,
+	options?: BedrockOptions,
+): AssistantMessageEventStream {
+	const region = getMantleRegion(options);
+	const mantleModel = buildMantleModel(model, region);
+	const apiKey = getMantleApiKey();
+	if (!apiKey) {
+		const errorStream = new AssistantMessageEventStream();
+		const errorMsg: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "bedrock-converse-stream",
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage:
+				"AWS_BEARER_TOKEN_BEDROCK is required for Kimi/Moonshot models on Bedrock. " +
+				"These models use bedrock-mantle (OpenAI-compatible endpoint) which requires bearer token authentication.",
+			timestamp: Date.now(),
+		};
+		errorStream.push({ type: "error", reason: "error", error: errorMsg });
+		errorStream.end();
+		return errorStream;
+	}
+	return streamOpenAICompletions(mantleModel, context, {
+		apiKey,
+		maxTokens: options?.maxTokens,
+		temperature: options?.temperature,
+		signal: options?.signal,
+		onPayload: options?.onPayload,
+	});
+}
+
 export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> = (
 	model: Model<"bedrock-converse-stream">,
 	context: Context,
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
+	// Route Kimi/Moonshot models through Bedrock's OpenAI-compatible endpoint
+	// (bedrock-mantle) instead of the Converse API. The Converse API has known
+	// tool call parsing bugs for these models (see vercel/ai#11409) that cause
+	// premature end_turn and lost tool calls in multi-step agentic workflows.
+	if (isMoonshotModel(model.id)) {
+		return streamViaMantle(model, context, options);
+	}
+
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
@@ -218,6 +375,11 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
+	// Route Kimi/Moonshot models through bedrock-mantle OpenAI-compatible endpoint
+	if (isMoonshotModel(model.id)) {
+		return streamViaMantleSimple(model, context, options);
+	}
+
 	const base = buildBaseOptions(model, options, undefined);
 	if (!options?.reasoning) {
 		return streamBedrock(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
