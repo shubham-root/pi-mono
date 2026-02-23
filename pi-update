@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+BRANCH="our.pi"
+
+cd "$REPO_DIR"
+
+# -------------------------------------------------------------------
+# 1. Merge upstream/main into our branch
+# -------------------------------------------------------------------
+echo "==> Fetching upstream..."
+git fetch upstream
+
+current=$(git branch --show-current)
+if [ "$current" != "$BRANCH" ]; then
+    echo "ERROR: expected branch '$BRANCH', currently on '$current'" >&2
+    exit 1
+fi
+
+echo "==> Rebasing $BRANCH onto upstream/main..."
+if ! git rebase upstream/main; then
+    echo "" >&2
+    echo "ERROR: Rebase conflicts detected." >&2
+    echo "Resolve them manually, then run:" >&2
+    echo "  git rebase --continue" >&2
+    echo "  ./pi-update  # re-run to finish build + install" >&2
+    echo "" >&2
+    echo "Or abort with:  git rebase --abort" >&2
+    exit 1
+fi
+
+echo "==> Rebase complete."
+
+# -------------------------------------------------------------------
+# 2. Build all packages
+# -------------------------------------------------------------------
+echo "==> Installing dependencies..."
+npm install
+
+echo "==> Building all packages..."
+npm run build
+
+# -------------------------------------------------------------------
+# 3. Install coding-agent as global 'pi' binary
+# -------------------------------------------------------------------
+echo "==> Installing pi globally..."
+npm install -g "$REPO_DIR/packages/coding-agent"
+
+echo ""
+echo "Done. 'pi' is now available globally:"
+which pi
+pi --version 2>/dev/null || true
