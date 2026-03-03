@@ -18,10 +18,13 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@mariozechner/pi-ai";
+import { randomUUID } from "crypto";
 
 export interface TensorZeroConfig {
 	gatewayUrl: string;
 	apiKey?: string;
+	/** Episode ID for grouping inferences within a session. Auto-generated if not provided. */
+	episodeId?: string;
 }
 
 export function getTensorZeroConfig(): TensorZeroConfig | undefined {
@@ -71,10 +74,14 @@ function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Mo
 
 /**
  * Create a stream function that routes all requests through TensorZero.
+ * All inferences share the same episode_id (one per session) so TensorZero
+ * can group them for analytics and caching.
  */
 export function createTensorZeroStreamFn(
 	config: TensorZeroConfig,
 ): (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream {
+	const episodeId = config.episodeId ?? randomUUID();
+
 	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream => {
 		const gatewayModel = rewriteModelForGateway(model, config);
 
@@ -83,6 +90,10 @@ export function createTensorZeroStreamFn(
 			apiKey: config.apiKey || options?.apiKey || "not-used",
 			headers: {
 				...options?.headers,
+			},
+			extraBody: {
+				...options?.extraBody,
+				"tensorzero::episode_id": episodeId,
 			},
 		};
 
