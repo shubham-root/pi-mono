@@ -220,16 +220,13 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private _agentEventQueue: Promise<void> = Promise.resolve();
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
-
-	// Event processing queue to ensure events are emitted to listeners in order
-	private _eventQueue: AgentEvent[] = [];
-	private _processingEvent = false;
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -320,25 +317,53 @@ export class AgentSession {
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
-	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
-		// Add event to queue and process
-		this._eventQueue.push(event);
-		if (this._processingEvent) {
-			return;
-		}
-		this._processingEvent = true;
+	private _handleAgentEvent = (event: AgentEvent): void => {
+		// Create retry promise synchronously before queueing async processing.
+		// Agent.emit() calls this handler synchronously, and prompt() calls waitForRetry()
+		// as soon as agent.prompt() resolves. If _retryPromise is created only inside
+		// _processAgentEvent, slow earlier queued events can delay agent_end processing
+		// and waitForRetry() can miss the in-flight retry.
+		this._createRetryPromiseForAgentEnd(event);
 
-		try {
-			while (this._eventQueue.length > 0) {
-				const ev = this._eventQueue.shift()!;
-				await this._processAgentEvent(ev);
-			}
-		} finally {
-			this._processingEvent = false;
-		}
+		this._agentEventQueue = this._agentEventQueue.then(
+			() => this._processAgentEvent(event),
+			() => this._processAgentEvent(event),
+		);
+
+		// Keep queue alive if an event handler fails
+		this._agentEventQueue.catch(() => {});
 	};
 
-	/** Process a single agent event - guaranteed to be called in order */
+	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
+		if (event.type !== "agent_end" || this._retryPromise) {
+			return;
+		}
+
+		const settings = this.settingsManager.getRetrySettings();
+		if (!settings.enabled) {
+			return;
+		}
+
+		const lastAssistant = this._findLastAssistantInMessages(event.messages);
+		if (!lastAssistant || !this._isRetryableError(lastAssistant)) {
+			return;
+		}
+
+		this._retryPromise = new Promise((resolve) => {
+			this._retryResolve = resolve;
+		});
+	}
+
+	private _findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "assistant") {
+				return message as AssistantMessage;
+			}
+		}
+		return undefined;
+	}
+
 	private async _processAgentEvent(event: AgentEvent): Promise<void> {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
