@@ -101,6 +101,13 @@ export interface StreamOptions {
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
 	 */
 	metadata?: Record<string, unknown>;
+	/**
+	 * Optional extra fields to include in the provider request body.
+	 * Spread into the top-level request payload. Useful for provider-specific
+	 * extensions (e.g., TensorZero's `tensorzero::episode_id`).
+	 * Currently supported by: openai-completions.
+	 */
+	extraBody?: Record<string, unknown>;
 }
 
 export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
