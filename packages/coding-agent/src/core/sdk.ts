@@ -13,6 +13,7 @@ import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
+import { createTensorZeroStreamFn, getTensorZeroConfig } from "./tensorzero-gateway.js";
 import { time } from "./timings.js";
 import {
 	allTools,
@@ -284,6 +285,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	const tensorZeroConfig = getTensorZeroConfig();
+	const tensorZeroStreamFn = tensorZeroConfig ? createTensorZeroStreamFn(tensorZeroConfig) : undefined;
+	if (tensorZeroConfig) {
+		console.log(`Routing LLM requests through TensorZero gateway: ${tensorZeroConfig.gatewayUrl}`);
+	}
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -291,6 +298,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			thinkingLevel,
 			tools: [],
 		},
+		streamFn: tensorZeroStreamFn,
 		convertToLlm: convertToLlmWithBlockImages,
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages) => {
