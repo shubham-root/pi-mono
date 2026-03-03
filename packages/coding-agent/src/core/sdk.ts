@@ -13,6 +13,7 @@ import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
+import { createTensorZeroStreamFn, getTensorZeroConfig } from "./tensorzero-gateway.js";
 import { time } from "./timings.js";
 import {
 	allTools,
@@ -293,6 +294,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	const tensorZeroConfig = getTensorZeroConfig();
+	const tensorZeroStreamFn = tensorZeroConfig ? createTensorZeroStreamFn(tensorZeroConfig) : undefined;
+	if (tensorZeroConfig) {
+		console.log(`Routing LLM requests through TensorZero gateway: ${tensorZeroConfig.gatewayUrl}`);
+	}
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -300,18 +307,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			thinkingLevel,
 			tools: [],
 		},
+		streamFn:
+			tensorZeroStreamFn ??
+			(async (model, context, options) => {
+				const auth = await modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) {
+					throw new Error(auth.error);
+				}
+				return streamSimple(model, context, {
+					...options,
+					apiKey: auth.apiKey,
+					headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
+				});
+			}),
 		convertToLlm: convertToLlmWithBlockImages,
-		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
-			return streamSimple(model, context, {
-				...options,
-				apiKey: auth.apiKey,
-				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
-			});
-		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {
