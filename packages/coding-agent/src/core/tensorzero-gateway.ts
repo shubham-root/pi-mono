@@ -6,9 +6,8 @@
  * routing, observability, and fallbacks.
  *
  * Environment variables:
- *   TENSORZERO_GATEWAY_URL  - Gateway base URL (e.g. https://13-232-113-182.sslip.io)
- *   TENSORZERO_GATEWAY_USER - Basic auth username (optional)
- *   TENSORZERO_GATEWAY_PASS - Basic auth password (optional)
+ *   TENSORZERO_GATEWAY_URL    - Gateway base URL (e.g. https://13-232-113-182.sslip.io/gateway)
+ *   TENSORZERO_GATEWAY_API_KEY - Gateway API key for authentication (optional)
  */
 
 import {
@@ -22,8 +21,7 @@ import {
 
 export interface TensorZeroConfig {
 	gatewayUrl: string;
-	username?: string;
-	password?: string;
+	apiKey?: string;
 }
 
 export function getTensorZeroConfig(): TensorZeroConfig | undefined {
@@ -32,33 +30,43 @@ export function getTensorZeroConfig(): TensorZeroConfig | undefined {
 
 	return {
 		gatewayUrl: gatewayUrl.replace(/\/+$/, ""),
-		username: process.env.TENSORZERO_GATEWAY_USER,
-		password: process.env.TENSORZERO_GATEWAY_PASS,
+		apiKey: process.env.TENSORZERO_GATEWAY_API_KEY,
 	};
+}
+
+/**
+ * Map pi-mono provider names to TensorZero provider names.
+ * TensorZero uses its own provider identifiers in the model name format:
+ *   tensorzero::model_name::<tz_provider>::<model_id>
+ */
+function mapProviderToTensorZero(provider: string): string {
+	const providerMap: Record<string, string> = {
+		"amazon-bedrock": "aws_bedrock",
+		anthropic: "anthropic",
+		openai: "openai",
+		"azure-openai-responses": "azure",
+		google: "google_ai_studio_gemini",
+		"google-vertex": "gcp_vertex_gemini",
+		xai: "xai",
+		mistral: "mistral",
+		groq: "groq",
+		openrouter: "openai", // OpenRouter is OpenAI-compatible
+	};
+	return providerMap[provider] ?? provider;
 }
 
 /**
  * Rewrite a model to route through TensorZero's OpenAI-compatible endpoint.
- * The original model ID is preserved so TensorZero can route to the correct backend.
+ * Uses the tensorzero::model_name::<provider>::<model_id> format.
  */
 function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Model<"openai-completions"> {
+	const tzProvider = mapProviderToTensorZero(model.provider);
 	return {
 		...model,
+		id: `tensorzero::model_name::${tzProvider}::${model.id}`,
 		api: "openai-completions" as const,
-		baseUrl: `${config.gatewayUrl}/v1`,
+		baseUrl: `${config.gatewayUrl}/openai/v1`,
 	};
-}
-
-/**
- * Build auth headers for the gateway (nginx basic auth).
- */
-function buildGatewayHeaders(config: TensorZeroConfig): Record<string, string> {
-	const headers: Record<string, string> = {};
-	if (config.username && config.password) {
-		const credentials = Buffer.from(`${config.username}:${config.password}`).toString("base64");
-		headers.Authorization = `Basic ${credentials}`;
-	}
-	return headers;
 }
 
 /**
@@ -69,12 +77,11 @@ export function createTensorZeroStreamFn(
 ): (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream {
 	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream => {
 		const gatewayModel = rewriteModelForGateway(model, config);
-		const gatewayHeaders = buildGatewayHeaders(config);
 
 		const mergedOptions: SimpleStreamOptions = {
 			...options,
+			apiKey: config.apiKey || options?.apiKey || "not-used",
 			headers: {
-				...gatewayHeaders,
 				...options?.headers,
 			},
 		};
