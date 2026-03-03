@@ -45,6 +45,8 @@ function uuidv7(): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export type TensorZeroCacheMode = "on" | "off" | "write_only" | "read_only";
+
 export interface TensorZeroConfig {
 	gatewayUrl: string;
 	apiKey?: string;
@@ -112,22 +114,36 @@ function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Mo
  */
 export function createTensorZeroStreamFn(
 	config: TensorZeroConfig,
-): (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream {
+	options: { cacheMode?: TensorZeroCacheMode } = {},
+): (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions) => AssistantMessageEventStream {
 	const episodeId = config.episodeId ?? uuidv7();
+	const desiredCacheMode = options.cacheMode ?? "on";
 
-	return (model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream => {
+	return (model: Model<Api>, context: Context, streamOptions?: SimpleStreamOptions): AssistantMessageEventStream => {
 		const gatewayModel = rewriteModelForGateway(model, config);
 
+		const headers = {
+			...streamOptions?.headers,
+		};
+
+		const extraBody: Record<string, unknown> = {
+			...streamOptions?.extraBody,
+			"tensorzero::episode_id": episodeId,
+		};
+
+		const existingCacheOptions = extraBody.cache_options;
+		const cacheOptions =
+			typeof existingCacheOptions === "object" && existingCacheOptions !== null
+				? { ...(existingCacheOptions as Record<string, unknown>) }
+				: {};
+		cacheOptions.enabled = desiredCacheMode;
+		extraBody.cache_options = cacheOptions;
+
 		const mergedOptions: SimpleStreamOptions = {
-			...options,
-			apiKey: config.apiKey || options?.apiKey || "not-used",
-			headers: {
-				...options?.headers,
-			},
-			extraBody: {
-				...options?.extraBody,
-				"tensorzero::episode_id": episodeId,
-			},
+			...streamOptions,
+			apiKey: config.apiKey || streamOptions?.apiKey || "not-used",
+			headers,
+			extraBody,
 		};
 
 		return streamSimple(gatewayModel, context, mergedOptions);
