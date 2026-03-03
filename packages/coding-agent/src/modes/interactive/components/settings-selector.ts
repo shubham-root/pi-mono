@@ -43,6 +43,8 @@ export interface SettingsConfig {
 	autocompleteMaxVisible: number;
 	quietStartup: boolean;
 	clearOnShrink: boolean;
+	tensorZeroGateway: boolean;
+	tensorZeroConfigured: boolean;
 }
 
 export interface SettingsCallbacks {
@@ -65,6 +67,7 @@ export interface SettingsCallbacks {
 	onAutocompleteMaxVisibleChange: (maxVisible: number) => void;
 	onQuietStartupChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
+	onTensorZeroGatewayChange: (enabled: boolean) => void;
 	onCancel: () => void;
 }
 
@@ -334,6 +337,18 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
+		// TensorZero gateway toggle (only show if TENSORZERO_GATEWAY_URL is configured)
+		if (config.tensorZeroConfigured) {
+			const clearOnShrinkIndex = items.findIndex((item) => item.id === "clear-on-shrink");
+			items.splice(clearOnShrinkIndex + 1, 0, {
+				id: "tensorzero-gateway",
+				label: "TensorZero gateway",
+				description: "Route LLM requests through TensorZero gateway",
+				currentValue: config.tensorZeroGateway ? "true" : "false",
+				values: ["true", "false"],
+			});
+		}
+
 		// Add borders
 		this.addChild(new DynamicBorder());
 
@@ -390,6 +405,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "clear-on-shrink":
 						callbacks.onClearOnShrinkChange(newValue === "true");
+						break;
+					case "tensorzero-gateway":
+						callbacks.onTensorZeroGatewayChange(newValue === "true");
 						break;
 				}
 			},
