@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import type { TensorZeroCacheMode } from "./tensorzero-gateway.js";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -96,6 +97,7 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	tensorZeroGateway?: boolean; // Route LLM requests through TensorZero gateway (requires TENSORZERO_GATEWAY_URL)
+	tensorZeroCacheMode?: TensorZeroCacheMode;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
