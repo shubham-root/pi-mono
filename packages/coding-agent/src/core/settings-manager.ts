@@ -92,6 +92,7 @@ export interface Settings {
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
+	tensorZeroGateway?: boolean; // Route LLM requests through TensorZero gateway (requires TENSORZERO_GATEWAY_URL)
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -898,5 +899,19 @@ export class SettingsManager {
 
 	getCodeBlockIndent(): string {
 		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getTensorZeroGateway(): boolean {
+		// Setting takes precedence, then default to true if env var is configured
+		if (this.settings.tensorZeroGateway !== undefined) {
+			return this.settings.tensorZeroGateway;
+		}
+		return !!process.env.TENSORZERO_GATEWAY_URL;
+	}
+
+	setTensorZeroGateway(enabled: boolean): void {
+		this.globalSettings.tensorZeroGateway = enabled;
+		this.markModified("tensorZeroGateway");
+		this.save();
 	}
 }
