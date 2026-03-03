@@ -63,35 +63,43 @@ export function getTensorZeroConfig(): TensorZeroConfig | undefined {
 }
 
 /**
- * Map pi-mono provider names to TensorZero provider names.
- * TensorZero uses its own provider identifiers in the model name format:
- *   tensorzero::model_name::<tz_provider>::<model_id>
+ * Providers that support TensorZero's implicit model resolution format:
+ *   tensorzero::model_name::<provider_type>::<model_id>
+ * Other providers must be pre-defined in tensorzero.toml and referenced by
+ * their config name using the {provider}--{model_id} convention.
  */
-function mapProviderToTensorZero(provider: string): string {
-	const providerMap: Record<string, string> = {
-		"amazon-bedrock": "aws_bedrock",
-		anthropic: "anthropic",
-		openai: "openai",
-		"azure-openai-responses": "azure",
-		google: "google_ai_studio_gemini",
-		"google-vertex": "gcp_vertex_gemini",
-		xai: "xai",
-		mistral: "mistral",
-		groq: "groq",
-		openrouter: "openai", // OpenRouter is OpenAI-compatible
-	};
-	return providerMap[provider] ?? provider;
-}
+const IMPLICIT_PROVIDERS: Record<string, string> = {
+	anthropic: "anthropic",
+	openai: "openai",
+	google: "google_ai_studio_gemini",
+	"google-vertex": "gcp_vertex_gemini",
+	xai: "xai",
+	mistral: "mistral",
+	groq: "groq",
+};
 
 /**
  * Rewrite a model to route through TensorZero's OpenAI-compatible endpoint.
- * Uses the tensorzero::model_name::<provider>::<model_id> format.
+ *
+ * For providers that support implicit model resolution (anthropic, openai, etc.):
+ *   tensorzero::model_name::<provider_type>::<model_id>
+ *
+ * For providers whose models must be pre-defined in tensorzero.toml (bedrock,
+ * openrouter, azure, etc.), use the config name convention: {provider}--{model_id}
+ *   tensorzero::model_name::{provider}--{model_id}
  */
 function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Model<"openai-completions"> {
-	const tzProvider = mapProviderToTensorZero(model.provider);
+	let tzModelName: string;
+	const tzProviderType = IMPLICIT_PROVIDERS[model.provider];
+	if (tzProviderType) {
+		tzModelName = `tensorzero::model_name::${tzProviderType}::${model.id}`;
+	} else {
+		// Must be pre-defined in tensorzero.toml as "{provider}--{model_id}"
+		tzModelName = `tensorzero::model_name::${model.provider}--${model.id}`;
+	}
 	return {
 		...model,
-		id: `tensorzero::model_name::${tzProvider}::${model.id}`,
+		id: tzModelName,
 		api: "openai-completions" as const,
 		baseUrl: `${config.gatewayUrl}/openai/v1`,
 	};
