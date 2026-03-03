@@ -60,6 +60,7 @@ import { resolveModelScope } from "../../core/model-resolver.js";
 import type { ResourceDiagnostic } from "../../core/resource-loader.js";
 import { type SessionContext, SessionManager } from "../../core/session-manager.js";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.js";
+import { createTensorZeroStreamFn, getTensorZeroConfig } from "../../core/tensorzero-gateway.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -3051,6 +3052,8 @@ export class InteractiveMode {
 					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
 					quietStartup: this.settingsManager.getQuietStartup(),
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
+					tensorZeroGateway: this.settingsManager.getTensorZeroGateway(),
+					tensorZeroConfigured: !!process.env.TENSORZERO_GATEWAY_URL,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -3149,6 +3152,15 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
+					},
+					onTensorZeroGatewayChange: (enabled) => {
+						this.settingsManager.setTensorZeroGateway(enabled);
+						const tzConfig = getTensorZeroConfig();
+						if (enabled && tzConfig) {
+							this.session.agent.streamFn = createTensorZeroStreamFn(tzConfig);
+						} else {
+							this.session.agent.streamFn = streamSimple;
+						}
 					},
 					onCancel: () => {
 						done();
