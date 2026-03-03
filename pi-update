@@ -39,6 +39,9 @@ fi
 
 echo "==> Rebase complete."
 
+echo "==> Pushing rebased branch to origin (force-with-lease)..."
+git push --force-with-lease origin "$BRANCH"
+
 # -------------------------------------------------------------------
 # 2. Build all packages
 # -------------------------------------------------------------------
