@@ -428,6 +428,11 @@ function buildParams(model: Model<"openai-completions">, context: Context, optio
 		}
 	}
 
+	// Spread extra body fields (e.g., TensorZero episode_id)
+	if (options?.extraBody) {
+		Object.assign(params, options.extraBody);
+	}
+
 	return params;
 }
 
