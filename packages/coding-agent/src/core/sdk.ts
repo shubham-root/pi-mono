@@ -286,8 +286,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const tensorZeroConfig = getTensorZeroConfig();
-	const tensorZeroStreamFn = tensorZeroConfig ? createTensorZeroStreamFn(tensorZeroConfig) : undefined;
-	if (tensorZeroConfig) {
+	const useTensorZero = tensorZeroConfig && settingsManager.getTensorZeroGateway();
+	const tensorZeroStreamFn = useTensorZero ? createTensorZeroStreamFn(tensorZeroConfig) : undefined;
+	if (useTensorZero) {
 		console.log(`Routing LLM requests through TensorZero gateway: ${tensorZeroConfig.gatewayUrl}`);
 	}
 
