@@ -97,6 +97,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let currentBlock: TextContent | ThinkingContent | (ToolCall & { partialArgs?: string }) | null = null;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
+
+			// TensorZero streams tensorzero_raw_usage on early chunks (e.g., Anthropic
+			// message_start) but sends the final aggregated usage on a separate later
+			// chunk. Accumulate raw_usage entries across all chunks so they are
+			// available when we process the final usage chunk.
+			const accumulatedTzRawUsage: Array<{ provider_type: string; data?: Record<string, unknown> }> = [];
 			const finishCurrentBlock = (block?: typeof currentBlock) => {
 				if (block) {
 					if (block.type === "text") {
@@ -133,12 +139,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;
 				if (chunk.usage) {
-					const chunkAny = chunk as any;
 					// TensorZero includes raw provider usage when tensorzero::include_raw_usage is true.
 					// Extract cache token counts from raw provider data since TensorZero normalizes
 					// them away from the standard OpenAI usage fields.
+					// Use accumulated raw_usage (collected from all chunks) merged with any
+					// raw_usage on this final chunk itself.
 					const tzRawUsage: Array<{ provider_type: string; data?: Record<string, unknown> }> | undefined =
-						chunkAny.usage?.tensorzero_raw_usage ?? chunkAny.tensorzero_raw_usage;
+						accumulatedTzRawUsage.length > 0 ? accumulatedTzRawUsage : undefined;
 
 					// Anthropic-format raw usage: cache_read_input_tokens, cache_creation_input_tokens
 					// Applies to provider_type: anthropic, gcp_vertex_anthropic, openrouter (Anthropic models)
