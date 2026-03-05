@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed TensorZero gateway session resuming: wrap the output stream to restore the original model `id` and `api` in every `AssistantMessage` before it is persisted. Previously the TZ-internal rewritten values (`tensorzero::model_name::...` and `openai-completions`) were stored, causing model restoration to silently fail on resume (model not found in registry) and breaking `isSameModel` checks in `transform-messages.ts`, which stripped thinking signatures when switching between TZ and direct provider access.
+
 ## [0.56.2] - 2026-03-05
 
 ### Fixed
