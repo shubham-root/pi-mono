@@ -145,17 +145,32 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				if (chunk.usage) {
 					const chunkAny = chunk as any;
 					// TensorZero includes raw provider usage when tensorzero::include_raw_usage is true.
-					// For Anthropic models routed via TensorZero, extract cache token counts from there
-					// since TensorZero normalizes them away from the standard OpenAI usage fields.
+					// Extract cache token counts from raw provider data since TensorZero normalizes
+					// them away from the standard OpenAI usage fields.
 					const tzRawUsage: Array<{ provider_type: string; data?: Record<string, unknown> }> | undefined =
 						chunkAny.usage?.tensorzero_raw_usage ?? chunkAny.tensorzero_raw_usage;
-					const anthropicRaw = tzRawUsage?.find((r) => r.provider_type === "anthropic")?.data;
-					const tzCacheRead = anthropicRaw
-						? ((anthropicRaw.cache_read_input_tokens as number | null | undefined) ?? 0)
-						: 0;
-					const tzCacheWrite = anthropicRaw
-						? ((anthropicRaw.cache_creation_input_tokens as number | null | undefined) ?? 0)
-						: 0;
+
+					// Anthropic-format raw usage: cache_read_input_tokens, cache_creation_input_tokens
+					// Applies to provider_type: anthropic, gcp_vertex_anthropic, openrouter (Anthropic models)
+					const anthropicFormatRaw = tzRawUsage?.find(
+						(r) =>
+							r.provider_type === "anthropic" ||
+							r.provider_type === "gcp_vertex_anthropic" ||
+							r.provider_type === "openrouter",
+					)?.data;
+					// AWS Bedrock raw usage: cacheReadInputTokens, cacheWriteInputTokens (camelCase)
+					const bedrockRaw = tzRawUsage?.find((r) => r.provider_type === "aws_bedrock")?.data;
+
+					const tzCacheRead = anthropicFormatRaw
+						? ((anthropicFormatRaw.cache_read_input_tokens as number | null | undefined) ?? 0)
+						: bedrockRaw
+							? ((bedrockRaw.cacheReadInputTokens as number | null | undefined) ?? 0)
+							: 0;
+					const tzCacheWrite = anthropicFormatRaw
+						? ((anthropicFormatRaw.cache_creation_input_tokens as number | null | undefined) ?? 0)
+						: bedrockRaw
+							? ((bedrockRaw.cacheWriteInputTokens as number | null | undefined) ?? 0)
+							: 0;
 
 					const cachedTokens = tzCacheRead || chunk.usage.prompt_tokens_details?.cached_tokens || 0;
 					const cacheWrite = tzCacheWrite;
