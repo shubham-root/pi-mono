@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed TensorZero gateway cache options using wrong key for OpenAI-compatible endpoint: changed `cache_options` to `tensorzero::cache_options` in `extraBody` so the `tensorZeroCacheMode` setting is correctly forwarded to the gateway.
+
 ## [0.56.1] - 2026-03-05
 
 ### Fixed
