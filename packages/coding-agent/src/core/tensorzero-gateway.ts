@@ -131,13 +131,13 @@ export function createTensorZeroStreamFn(
 			"tensorzero::episode_id": episodeId,
 		};
 
-		const existingCacheOptions = extraBody.cache_options;
+		const existingCacheOptions = extraBody["tensorzero::cache_options"];
 		const cacheOptions =
 			typeof existingCacheOptions === "object" && existingCacheOptions !== null
 				? { ...(existingCacheOptions as Record<string, unknown>) }
 				: {};
 		cacheOptions.enabled = desiredCacheMode;
-		extraBody.cache_options = cacheOptions;
+		extraBody["tensorzero::cache_options"] = cacheOptions;
 
 		const mergedOptions: SimpleStreamOptions = {
 			...streamOptions,
