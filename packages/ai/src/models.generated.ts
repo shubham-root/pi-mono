@@ -5881,6 +5881,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"glm-4.7": {
 			id: "glm-4.7",
@@ -5898,6 +5899,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"glm-5": {
 			id: "glm-5",
@@ -5915,6 +5917,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"gpt-5": {
 			id: "gpt-5",
@@ -6102,6 +6105,7 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.1": {
 			id: "minimax-m2.1",
@@ -6119,6 +6123,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5": {
 			id: "minimax-m2.5",
@@ -6136,6 +6141,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5-free": {
 			id: "minimax-m2.5-free",
@@ -6170,6 +6176,7 @@ export const MODELS = {
 			},
 			contextWindow: 131072,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 	},
 	"opencode-go": {
@@ -6189,6 +6196,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"kimi-k2.5": {
 			id: "kimi-k2.5",
@@ -6206,6 +6214,7 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5": {
 			id: "minimax-m2.5",
