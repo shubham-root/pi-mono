@@ -10,6 +10,7 @@ import {
 	Spacer,
 	Text,
 } from "@mariozechner/pi-tui";
+import type { TensorZeroCacheMode } from "../../../core/tensorzero-gateway.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
@@ -45,6 +46,7 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	tensorZeroGateway: boolean;
 	tensorZeroConfigured: boolean;
+	tensorZeroCacheMode: TensorZeroCacheMode;
 }
 
 export interface SettingsCallbacks {
@@ -68,6 +70,7 @@ export interface SettingsCallbacks {
 	onQuietStartupChange: (enabled: boolean) => void;
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onTensorZeroGatewayChange: (enabled: boolean) => void;
+	onTensorZeroCacheModeChange: (mode: TensorZeroCacheMode) => void;
 	onCancel: () => void;
 }
 
@@ -347,6 +350,30 @@ export class SettingsSelectorComponent extends Container {
 				currentValue: config.tensorZeroGateway ? "true" : "false",
 				values: ["true", "false"],
 			});
+
+			items.splice(clearOnShrinkIndex + 2, 0, {
+				id: "tensorzero-cache-mode",
+				label: "TensorZero cache mode",
+				description: "Control TensorZero inference cache behavior",
+				currentValue: config.tensorZeroCacheMode,
+				submenu: (currentValue, done) =>
+					new SelectSubmenu(
+						"TensorZero cache mode",
+						"Choose how TensorZero reads and writes the inference cache",
+						[
+							{ value: "on", label: "On", description: "Read and write cache entries" },
+							{ value: "write_only", label: "Write only", description: "Only write new cache entries" },
+							{ value: "read_only", label: "Read only", description: "Only serve cached responses" },
+							{ value: "off", label: "Off", description: "Disable caching" },
+						],
+						currentValue,
+						(value) => {
+							callbacks.onTensorZeroCacheModeChange(value as TensorZeroCacheMode);
+							done(value);
+						},
+						() => done(),
+					),
+			});
 		}
 
 		// Add borders
@@ -408,6 +435,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "tensorzero-gateway":
 						callbacks.onTensorZeroGatewayChange(newValue === "true");
+						break;
+					case "tensorzero-cache-mode":
+						callbacks.onTensorZeroCacheModeChange(newValue as TensorZeroCacheMode);
 						break;
 				}
 			},
