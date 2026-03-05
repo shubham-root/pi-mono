@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed TensorZero cache read/write stats always showing 0 in streaming responses. TZ sends `tensorzero_raw_usage` (containing provider-level cache token counts) on early streaming chunks but sends aggregated usage on the final chunk without raw_usage. The openai-completions provider now accumulates raw_usage entries across all chunks so cache stats are available when computing the final usage.
+
 ## [0.56.2] - 2026-03-05
 
 ## [0.56.1] - 2026-03-05
