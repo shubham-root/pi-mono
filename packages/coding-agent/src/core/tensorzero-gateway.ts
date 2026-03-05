@@ -15,6 +15,7 @@ import {
 	type AssistantMessageEventStream,
 	type CacheRetention,
 	type Context,
+	createAssistantMessageEventStream,
 	type Message,
 	type Model,
 	type SimpleStreamOptions,
@@ -406,6 +407,56 @@ function buildProviderCachePatches(
 }
 
 /**
+ * Wrap a stream to restore the original model metadata (provider, api, model id)
+ * in the output AssistantMessage.
+ *
+ * TensorZero rewrites the model to an openai-completions gateway model before
+ * calling the upstream provider, so the raw stream returns messages with:
+ *   api: "openai-completions"
+ *   model: "tensorzero::model_name::..."
+ *
+ * These TZ-internal values must NOT be persisted to the session file because:
+ *   1. "tensorzero::model_name::..." is not in the model registry, so model
+ *      restoration on session resume silently fails.
+ *   2. `isSameModel` checks in transform-messages.ts use api+model+provider to
+ *      decide whether to preserve thinking signatures; storing the TZ api makes
+ *      the check fail when the user switches between TZ and direct provider
+ *      access, causing thinking blocks to be stripped unnecessarily.
+ *
+ * The `partial` reference is shared across all stream events (it is the same
+ * mutable `output` object), so patching it once on the `start` event is
+ * sufficient for all subsequent events and the final done/error message.
+ */
+function wrapWithOriginalModel(
+	innerStream: AssistantMessageEventStream,
+	originalModel: Model<Api>,
+): AssistantMessageEventStream {
+	const outerStream = createAssistantMessageEventStream();
+
+	(async () => {
+		for await (const event of innerStream) {
+			// Patch on start – this fixes all subsequent events that share the
+			// same mutable partial reference, including the final done/error.
+			if (event.type === "start") {
+				event.partial.model = originalModel.id;
+				event.partial.api = originalModel.api;
+				event.partial.provider = originalModel.provider;
+			} else if (event.type === "done" || event.type === "error") {
+				// Guard: also patch here in case no "start" event was emitted
+				// (e.g., immediate error before streaming begins).
+				const msg = event.type === "done" ? event.message : event.error;
+				msg.model = originalModel.id;
+				msg.api = originalModel.api;
+				msg.provider = originalModel.provider;
+			}
+			outerStream.push(event);
+		}
+	})();
+
+	return outerStream;
+}
+
+/**
  * Create a stream function that routes all requests through TensorZero.
  * All inferences share the same episode_id (one per session) so TensorZero
  * can group them for analytics and caching.
@@ -457,6 +508,9 @@ export function createTensorZeroStreamFn(
 			extraBody,
 		};
 
-		return streamSimple(gatewayModel, context, mergedOptions);
+		// Route through TZ, then restore original model metadata so the persisted
+		// AssistantMessage uses the real model id/api, not the TZ-internal values.
+		const innerStream = streamSimple(gatewayModel, context, mergedOptions);
+		return wrapWithOriginalModel(innerStream, model);
 	};
 }
