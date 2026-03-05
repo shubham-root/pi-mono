@@ -491,6 +491,9 @@ export class InteractiveMode {
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
+
+		// Initialize TensorZero gateway status for footer display
+		this.footerDataProvider.setTensorZeroActive(this.settingsManager.getTensorZeroGateway());
 	}
 
 	/**
@@ -3163,6 +3166,7 @@ export class InteractiveMode {
 					},
 					onTensorZeroGatewayChange: (enabled) => {
 						this.settingsManager.setTensorZeroGateway(enabled);
+						this.footerDataProvider.setTensorZeroActive(enabled);
 						const tzConfig = getTensorZeroConfig();
 						if (enabled && tzConfig) {
 							this.session.agent.streamFn = createTensorZeroStreamFn(tzConfig, {

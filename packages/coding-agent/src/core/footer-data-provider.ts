@@ -43,6 +43,7 @@ export class FooterDataProvider {
 	private gitWatcher: FSWatcher | null = null;
 	private branchChangeCallbacks = new Set<() => void>();
 	private availableProviderCount = 0;
+	private tensorZeroActive = false;
 
 	constructor() {
 		this.setupGitWatcher();
@@ -101,6 +102,16 @@ export class FooterDataProvider {
 		this.availableProviderCount = count;
 	}
 
+	/** Whether TensorZero gateway is active for this session */
+	getTensorZeroActive(): boolean {
+		return this.tensorZeroActive;
+	}
+
+	/** Internal: update TensorZero gateway status */
+	setTensorZeroActive(active: boolean): void {
+		this.tensorZeroActive = active;
+	}
+
 	/** Internal: cleanup */
 	dispose(): void {
 		if (this.gitWatcher) {
@@ -140,5 +151,5 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"
+	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange" | "getTensorZeroActive"
 >;
