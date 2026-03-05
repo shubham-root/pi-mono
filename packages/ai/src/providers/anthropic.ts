@@ -46,6 +46,28 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 	return "short";
 }
 
+/**
+ * Check if a model supports Anthropic-style prompt caching (cache_control).
+ * Only Anthropic Claude models support this. Non-Claude models routed through
+ * Anthropic-compatible proxies (e.g. opencode.ai/zen for minimax, big-pickle)
+ * do not support cache_control and may reject or mishandle it.
+ */
+function supportsAnthropicCaching(model: Model<"anthropic-messages">): boolean {
+	// Models with non-zero cache costs explicitly support caching
+	if (model.cost.cacheRead || model.cost.cacheWrite) {
+		return true;
+	}
+
+	// Check model ID for known Claude patterns
+	const id = model.id.toLowerCase();
+	if (id.includes("claude")) return true;
+
+	// Anthropic provider always supports caching (all models are Claude)
+	if (model.provider === "anthropic") return true;
+
+	return false;
+}
+
 function getCacheControl(
 	baseUrl: string,
 	cacheRetention?: CacheRetention,
@@ -590,7 +612,10 @@ function buildParams(
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
-	const { cacheControl } = getCacheControl(model.baseUrl, options?.cacheRetention);
+	const { cacheControl: rawCacheControl } = getCacheControl(model.baseUrl, options?.cacheRetention);
+	// Only apply cache_control for models that actually support Anthropic caching.
+	// Non-Claude models on proxies (e.g. opencode minimax, big-pickle) don't support it.
+	const cacheControl = supportsAnthropicCaching(model) ? rawCacheControl : undefined;
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
