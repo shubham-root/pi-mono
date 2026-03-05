@@ -13,10 +13,13 @@
 import {
 	type Api,
 	type AssistantMessageEventStream,
+	type CacheRetention,
 	type Context,
+	type Message,
 	type Model,
 	type SimpleStreamOptions,
 	streamSimple,
+	type UserMessage,
 } from "@mariozechner/pi-ai";
 import { randomBytes } from "crypto";
 
@@ -107,6 +110,263 @@ function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Mo
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Provider-level prompt caching via tensorzero::extra_body
+//
+// TensorZero's `tensorzero::extra_body` accepts an array of JSON Pointer
+// patches applied to the provider's native request body right before it is
+// sent.  This lets pi inject provider-specific cache-control markers without
+// needing a custom TensorZero plugin.
+//
+// Supported providers:
+//   anthropic     – cache_control: { type: "ephemeral" } on system block and
+//                   last content block of last message.
+//   amazon-bedrock – cachePoint: { type: "default" } appended to system array
+//                   and to the last message's content array.
+//   openrouter    – same cache_control shape as anthropic, but the system
+//                   prompt lives at messages[0] and content is always sent as
+//                   an array by TZ's OpenRouter provider, so we replace the
+//                   entire content field of the last user message.
+// ---------------------------------------------------------------------------
+
+interface ExtraBodyPatch {
+	pointer: string;
+	value: unknown;
+}
+
+/**
+ * Resolve cacheRetention from stream options, falling back to the
+ * PI_CACHE_RETENTION environment variable (same logic as anthropic.ts).
+ */
+function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
+	if (cacheRetention) return cacheRetention;
+	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") return "long";
+	return "short";
+}
+
+/**
+ * Build the Anthropic cache_control object.
+ * 1h TTL is only honoured by api.anthropic.com (extended caching feature).
+ */
+function buildAnthropicCacheControl(retention: CacheRetention, gatewayUrl: string): { type: "ephemeral"; ttl?: "1h" } {
+	const ttl = retention === "long" && gatewayUrl.includes("api.anthropic.com") ? "1h" : undefined;
+	return ttl ? { type: "ephemeral", ttl } : { type: "ephemeral" };
+}
+
+/**
+ * Compute the index of the last message and its last content block as they
+ * will appear in TensorZero's Anthropic-format request.
+ *
+ * TensorZero coalesces consecutive tool-result messages into a single
+ * user message (to satisfy Anthropic's parallel tool-call requirement).
+ * We mirror that logic here so the pointer targets the correct block.
+ */
+function computeAnthropicLastMessageInfo(messages: Message[]): { messageIndex: number; contentIndex: number } | null {
+	if (messages.length === 0) return null;
+
+	// Count TZ-format messages, coalescing consecutive toolResult runs.
+	let tzCount = 0;
+	let i = 0;
+	while (i < messages.length) {
+		if (messages[i].role === "toolResult") {
+			while (i < messages.length && messages[i].role === "toolResult") i++;
+			tzCount++;
+		} else {
+			i++;
+			tzCount++;
+		}
+	}
+
+	const messageIndex = tzCount - 1;
+
+	// Determine contentIndex: how many content blocks does the last TZ message have?
+	const lastMsg = messages[messages.length - 1];
+
+	if (lastMsg.role === "toolResult") {
+		// Count how many consecutive toolResult messages form the last TZ user message.
+		let toolCount = 0;
+		let j = messages.length - 1;
+		while (j >= 0 && messages[j].role === "toolResult") {
+			toolCount++;
+			j--;
+		}
+		return { messageIndex, contentIndex: toolCount - 1 };
+	}
+
+	if (lastMsg.role === "user") {
+		const content = lastMsg.content;
+		if (typeof content === "string") return { messageIndex, contentIndex: 0 };
+		return { messageIndex, contentIndex: Math.max(0, content.length - 1) };
+	}
+
+	// Last message is an assistant message – shouldn't happen in normal pi flow.
+	return null;
+}
+
+/**
+ * Build tensorzero::extra_body patches for Anthropic's native provider.
+ *
+ * TZ sends:
+ *   { "system": [{ "type": "text", "text": "..." }], "messages": [...] }
+ *
+ * Patches add cache_control to:
+ *   - /system/0/cache_control
+ *   - /messages/{N}/content/{M}/cache_control  (last content block of last message)
+ */
+function buildAnthropicCachePatches(
+	context: Context,
+	cacheControl: ReturnType<typeof buildAnthropicCacheControl>,
+): ExtraBodyPatch[] {
+	const patches: ExtraBodyPatch[] = [];
+
+	if (context.systemPrompt) {
+		patches.push({ pointer: "/system/0/cache_control", value: cacheControl });
+	}
+
+	const lastInfo = computeAnthropicLastMessageInfo(context.messages);
+	if (lastInfo) {
+		patches.push({
+			pointer: `/messages/${lastInfo.messageIndex}/content/${lastInfo.contentIndex}/cache_control`,
+			value: cacheControl,
+		});
+	}
+
+	return patches;
+}
+
+/**
+ * Build tensorzero::extra_body patches for AWS Bedrock's native provider.
+ *
+ * Bedrock uses a cachePoint block appended to arrays rather than a
+ * cache_control field on existing blocks.  TZ's `-` pointer appends.
+ *
+ * TZ sends:
+ *   { "system": [...], "messages": [...] }
+ *
+ * Patches append cachePoint to:
+ *   - /system/-
+ *   - /messages/{N}/content/-
+ */
+function buildBedrockCachePatches(context: Context): ExtraBodyPatch[] {
+	const patches: ExtraBodyPatch[] = [];
+	const cachePoint = { cachePoint: { type: "default" } };
+
+	if (context.systemPrompt) {
+		patches.push({ pointer: "/system/-", value: cachePoint });
+	}
+
+	const lastInfo = computeAnthropicLastMessageInfo(context.messages);
+	if (lastInfo) {
+		patches.push({ pointer: `/messages/${lastInfo.messageIndex}/content/-`, value: cachePoint });
+	}
+
+	return patches;
+}
+
+/**
+ * Build tensorzero::extra_body patches for Anthropic models routed via
+ * OpenRouter through TensorZero.
+ *
+ * TZ's OpenRouter provider:
+ *   - Inserts a system message at messages[0] when a system prompt is present.
+ *   - Serialises single-text content blocks as a plain string, making a
+ *     field-level patch impossible.
+ *
+ * Strategy: replace the entire content field of the last user message with an
+ * array that includes cache_control on its last text block.  We can build that
+ * array because we have the original message content in context.
+ *
+ * Tool-result messages are kept as role:"tool" in OpenAI format (no coalescing
+ * at the OpenRouter level), so the relevant cache point is on the last explicit
+ * user message, not the last tool result.
+ */
+function buildOpenRouterAnthropicCachePatches(context: Context): ExtraBodyPatch[] {
+	const patches: ExtraBodyPatch[] = [];
+	const cacheControl: { type: "ephemeral" } = { type: "ephemeral" };
+
+	// Find the last UserMessage and its index in context.messages (= OpenAI message index).
+	let lastUserIdx = -1;
+	let lastUserMsg: UserMessage | null = null;
+	for (let i = context.messages.length - 1; i >= 0; i--) {
+		if (context.messages[i].role === "user") {
+			lastUserIdx = i;
+			lastUserMsg = context.messages[i] as UserMessage;
+			break;
+		}
+	}
+
+	if (lastUserIdx === -1 || !lastUserMsg) return patches;
+
+	// TZ's OpenRouter provider inserts the system message at messages[0],
+	// shifting all conversation messages by 1.
+	const openRouterIdx = context.systemPrompt ? lastUserIdx + 1 : lastUserIdx;
+
+	// Build the replacement content array with cache_control on the last text block.
+	const newContent = buildContentArrayWithCacheControl(lastUserMsg.content, cacheControl);
+	patches.push({ pointer: `/messages/${openRouterIdx}/content`, value: newContent });
+
+	return patches;
+}
+
+/**
+ * Convert a UserMessage content value to an array of content-block objects
+ * with cache_control added to the last text block.
+ */
+function buildContentArrayWithCacheControl(
+	content: UserMessage["content"],
+	cacheControl: { type: "ephemeral" },
+): unknown[] {
+	if (typeof content === "string") {
+		return [{ type: "text", text: content, cache_control: cacheControl }];
+	}
+
+	// Array content: find and annotate the last text block.
+	const blocks: unknown[] = content.map((block) => ({ ...block }));
+	for (let i = blocks.length - 1; i >= 0; i--) {
+		const block = blocks[i] as { type: string };
+		if (block.type === "text") {
+			blocks[i] = { ...block, cache_control: cacheControl };
+			break;
+		}
+	}
+	return blocks;
+}
+
+/**
+ * Compute the tensorzero::extra_body patches needed to enable provider-level
+ * prompt caching for the given model, context, and cache-retention setting.
+ *
+ * Returns an empty array when caching is disabled or the provider is not
+ * supported.
+ */
+function buildProviderCachePatches(
+	model: Model<Api>,
+	context: Context,
+	cacheRetention: CacheRetention,
+	gatewayUrl: string,
+): ExtraBodyPatch[] {
+	if (cacheRetention === "none") return [];
+
+	const provider = model.provider;
+
+	// opencode routes its anthropic-messages models to opencode.ai/zen using the
+	// Anthropic Messages format, so the same cache_control patches apply.
+	if (provider === "anthropic" || (provider === "opencode" && model.api === "anthropic-messages")) {
+		const cacheControl = buildAnthropicCacheControl(cacheRetention, gatewayUrl);
+		return buildAnthropicCachePatches(context, cacheControl);
+	}
+
+	if (provider === "amazon-bedrock") {
+		return buildBedrockCachePatches(context);
+	}
+
+	if (provider === "openrouter" && model.id.startsWith("anthropic/")) {
+		return buildOpenRouterAnthropicCachePatches(context);
+	}
+
+	return [];
+}
+
 /**
  * Create a stream function that routes all requests through TensorZero.
  * All inferences share the same episode_id (one per session) so TensorZero
@@ -138,6 +398,18 @@ export function createTensorZeroStreamFn(
 				: {};
 		cacheOptions.enabled = desiredCacheMode;
 		extraBody["tensorzero::cache_options"] = cacheOptions;
+
+		// Inject provider-level prompt-cache patches via tensorzero::extra_body.
+		// This runs before rewriteModelForGateway changes the provider, so we
+		// still have the original provider name available via `model.provider`.
+		const retention = resolveCacheRetention(streamOptions?.cacheRetention);
+		const cachePatches = buildProviderCachePatches(model, context, retention, config.gatewayUrl);
+		if (cachePatches.length > 0) {
+			const existing = extraBody["tensorzero::extra_body"];
+			const existingPatches: ExtraBodyPatch[] = Array.isArray(existing) ? existing : [];
+			// Caller-supplied patches take precedence; provider cache patches come first.
+			extraBody["tensorzero::extra_body"] = [...cachePatches, ...existingPatches];
+		}
 
 		const mergedOptions: SimpleStreamOptions = {
 			...streamOptions,
