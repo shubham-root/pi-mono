@@ -172,6 +172,11 @@ export class FooterComponent implements Component {
 				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
 		}
 
+		// Append TensorZero indicator if gateway is active
+		if (this.footerData.getTensorZeroActive()) {
+			rightSideWithoutProvider += " • TZ";
+		}
+
 		// Prepend the provider in parentheses if there are multiple providers and there's enough room
 		let rightSide = rightSideWithoutProvider;
 		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
