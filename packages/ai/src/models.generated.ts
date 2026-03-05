@@ -6224,6 +6224,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"gpt-5": {
 			id: "gpt-5",
@@ -6479,6 +6480,7 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"mimo-v2-omni-free": {
 			id: "mimo-v2-omni-free",
@@ -6530,6 +6532,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5-free": {
 			id: "minimax-m2.5-free",
@@ -6548,13 +6551,13 @@ export const MODELS = {
 			contextWindow: 204800,
 			maxTokens: 131072,
 		} satisfies Model<"anthropic-messages">,
-		"nemotron-3-super-free": {
-			id: "nemotron-3-super-free",
-			name: "Nemotron 3 Super Free",
+		"trinity-large-preview-free": {
+			id: "trinity-large-preview-free",
+			name: "Trinity Large Preview",
 			api: "openai-completions",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
-			reasoning: true,
+			reasoning: false,
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -6562,8 +6565,9 @@ export const MODELS = {
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
-			contextWindow: 1000000,
-			maxTokens: 128000,
+			contextWindow: 131072,
+			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 	},
 	"opencode-go": {
@@ -6583,6 +6587,7 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"kimi-k2.5": {
 			id: "kimi-k2.5",
@@ -6600,6 +6605,7 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
+			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5": {
 			id: "minimax-m2.5",
