@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [0.56.2] - 2026-03-05
-
 ### New Features
 
 - GPT-5.4 support across `openai`, `openai-codex`, `azure-openai-responses`, and `opencode`, with `gpt-5.4` now the default for `openai` and `openai-codex` ([README.md](README.md), [docs/providers.md](docs/providers.md)).
@@ -32,6 +30,7 @@
 - Fixed editor/footer visibility drift during terminal resize by forcing full redraws when terminal width or height changes ([#1844](https://github.com/badlogic/pi-mono/pull/1844) by [@ghoulr](https://github.com/ghoulr)).
 - Fixed footer width truncation for wide Unicode text (session name, model, provider) to prevent TUI crashes from rendered lines exceeding terminal width ([#1833](https://github.com/badlogic/pi-mono/issues/1833)).
 - Fixed Windows write preview background artifacts by normalizing CRLF content (`\r\n`) to LF for display rendering in tool output previews ([#1854](https://github.com/badlogic/pi-mono/issues/1854)).
+- Fixed TensorZero gateway cache options using wrong key for OpenAI-compatible endpoint: changed `cache_options` to `tensorzero::cache_options` in `extraBody` so the `tensorZeroCacheMode` setting is correctly forwarded to the gateway.
 
 ## [0.56.1] - 2026-03-05
 
