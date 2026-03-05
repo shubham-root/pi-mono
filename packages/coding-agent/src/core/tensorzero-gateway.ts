@@ -389,6 +389,7 @@ export function createTensorZeroStreamFn(
 		const extraBody: Record<string, unknown> = {
 			...streamOptions?.extraBody,
 			"tensorzero::episode_id": episodeId,
+			"tensorzero::include_raw_usage": true,
 		};
 
 		const existingCacheOptions = extraBody["tensorzero::cache_options"];
