@@ -287,7 +287,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const tensorZeroConfig = getTensorZeroConfig();
 	const useTensorZero = tensorZeroConfig && settingsManager.getTensorZeroGateway();
-	const tensorZeroStreamFn = useTensorZero ? createTensorZeroStreamFn(tensorZeroConfig) : undefined;
+	const tensorZeroStreamFn = useTensorZero
+		? createTensorZeroStreamFn(tensorZeroConfig, { cacheMode: settingsManager.getTensorZeroCacheMode() })
+		: undefined;
 	if (useTensorZero) {
 		console.log(`Routing LLM requests through TensorZero gateway: ${tensorZeroConfig.gatewayUrl}`);
 	}
