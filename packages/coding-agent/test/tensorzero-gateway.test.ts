@@ -534,3 +534,108 @@ describe("TensorZero gateway gating", () => {
 		});
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Original model metadata preservation (session resume fix)
+//
+// TensorZero rewrites model.id and model.api before routing the request.
+// The stream wrapper must restore the original values so that stored
+// AssistantMessages use the real model id/api rather than the TZ-internal
+// "tensorzero::model_name::..." id and "openai-completions" api.
+// ---------------------------------------------------------------------------
+
+describe("createTensorZeroStreamFn – original model metadata in output", () => {
+	it("output AssistantMessage carries original model id, api, and provider", async () => {
+		// Use a real stream via the actual (un-mocked) createAssistantMessageEventStream
+		// by creating a local mock that emits a minimal done event.
+		const { createAssistantMessageEventStream, getModel } = await import("@mariozechner/pi-ai");
+
+		const originalModel = getModel("anthropic", "claude-opus-4-5")!;
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+
+		// The module-level streamSimple mock returns an empty async generator.
+		// We need it to return a stream that emits a "done" event so the wrapper
+		// can propagate the patched message.  Use a real event stream here.
+		const innerStream = createAssistantMessageEventStream();
+
+		// Build a minimal AssistantMessage as TZ would produce (rewritten metadata)
+		const tzAssistantMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "hello" }],
+			api: "openai-completions" as const,
+			provider: "anthropic",
+			model: "tensorzero::model_name::anthropic::claude-opus-4-5",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now(),
+		};
+
+		// Drive innerStream with start + done events
+		innerStream.push({ type: "start", partial: tzAssistantMsg });
+		innerStream.push({ type: "done", reason: "stop", message: tzAssistantMsg });
+
+		// Replace the streamSimple mock temporarily to return our controlled stream
+		const { streamSimple: mockStreamSimple } = await import("@mariozechner/pi-ai");
+		vi.mocked(mockStreamSimple).mockReturnValueOnce(innerStream as any);
+
+		const outerStream = streamFn(originalModel, fakeContext);
+		const result = await outerStream.result();
+
+		// The output message must carry the ORIGINAL model metadata, not TZ-rewritten values
+		expect(result.model).toBe(originalModel.id); // "claude-opus-4-5"
+		expect(result.api).toBe(originalModel.api); // "anthropic-messages"
+		expect(result.provider).toBe(originalModel.provider); // "anthropic"
+	});
+
+	it("start event partial carries original model metadata", async () => {
+		const { createAssistantMessageEventStream, getModel } = await import("@mariozechner/pi-ai");
+
+		const originalModel = getModel("anthropic", "claude-opus-4-5")!;
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+
+		const innerStream = createAssistantMessageEventStream();
+		const tzAssistantMsg = {
+			role: "assistant" as const,
+			content: [],
+			api: "openai-completions" as const,
+			provider: "anthropic",
+			model: "tensorzero::model_name::anthropic::claude-opus-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now(),
+		};
+
+		innerStream.push({ type: "start", partial: tzAssistantMsg });
+		innerStream.push({ type: "done", reason: "stop", message: tzAssistantMsg });
+
+		const { streamSimple: mockStreamSimple } = await import("@mariozechner/pi-ai");
+		vi.mocked(mockStreamSimple).mockReturnValueOnce(innerStream as any);
+
+		const outerStream = streamFn(originalModel, fakeContext);
+
+		let startPartial: typeof tzAssistantMsg | undefined;
+		for await (const event of outerStream) {
+			if (event.type === "start") {
+				startPartial = event.partial as typeof tzAssistantMsg;
+				break;
+			}
+		}
+
+		expect(startPartial?.model).toBe(originalModel.id);
+		expect(startPartial?.api).toBe(originalModel.api);
+	});
+});
