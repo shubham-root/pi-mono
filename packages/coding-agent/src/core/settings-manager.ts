@@ -972,4 +972,14 @@ export class SettingsManager {
 		this.markModified("tensorZeroGateway");
 		this.save();
 	}
+
+	getTensorZeroCacheMode(): TensorZeroCacheMode {
+		return this.settings.tensorZeroCacheMode ?? "on";
+	}
+
+	setTensorZeroCacheMode(mode: TensorZeroCacheMode): void {
+		this.globalSettings.tensorZeroCacheMode = mode;
+		this.markModified("tensorZeroCacheMode");
+		this.save();
+	}
 }
