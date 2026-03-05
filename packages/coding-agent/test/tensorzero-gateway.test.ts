@@ -83,6 +83,14 @@ describe("createTensorZeroStreamFn – cache options", () => {
 		expect(opts.extraBody["tensorzero::episode_id"]).toBe(fakeConfig.episodeId);
 	});
 
+	it("sets tensorzero::include_raw_usage to true for cache token extraction", () => {
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		streamFn(fakeModel, fakeContext);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		expect(opts.extraBody["tensorzero::include_raw_usage"]).toBe(true);
+	});
+
 	it("rewrites model to route through TensorZero OpenAI-compatible endpoint", () => {
 		const streamFn = createTensorZeroStreamFn(fakeConfig);
 		streamFn(fakeModel, fakeContext);

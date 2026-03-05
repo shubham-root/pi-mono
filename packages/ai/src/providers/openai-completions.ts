@@ -143,19 +143,34 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			for await (const chunk of openaiStream) {
 				if (chunk.usage) {
-					const cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+					const chunkAny = chunk as any;
+					// TensorZero includes raw provider usage when tensorzero::include_raw_usage is true.
+					// For Anthropic models routed via TensorZero, extract cache token counts from there
+					// since TensorZero normalizes them away from the standard OpenAI usage fields.
+					const tzRawUsage: Array<{ provider_type: string; data?: Record<string, unknown> }> | undefined =
+						chunkAny.usage?.tensorzero_raw_usage ?? chunkAny.tensorzero_raw_usage;
+					const anthropicRaw = tzRawUsage?.find((r) => r.provider_type === "anthropic")?.data;
+					const tzCacheRead = anthropicRaw
+						? ((anthropicRaw.cache_read_input_tokens as number | null | undefined) ?? 0)
+						: 0;
+					const tzCacheWrite = anthropicRaw
+						? ((anthropicRaw.cache_creation_input_tokens as number | null | undefined) ?? 0)
+						: 0;
+
+					const cachedTokens = tzCacheRead || chunk.usage.prompt_tokens_details?.cached_tokens || 0;
+					const cacheWrite = tzCacheWrite;
 					const reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens || 0;
-					const input = (chunk.usage.prompt_tokens || 0) - cachedTokens;
+					const input = (chunk.usage.prompt_tokens || 0) - cachedTokens - cacheWrite;
 					const outputTokens = (chunk.usage.completion_tokens || 0) + reasoningTokens;
 					output.usage = {
 						// OpenAI includes cached tokens in prompt_tokens, so subtract to get non-cached input
 						input,
 						output: outputTokens,
 						cacheRead: cachedTokens,
-						cacheWrite: 0,
+						cacheWrite,
 						// Compute totalTokens ourselves since we add reasoning_tokens to output
 						// and some providers (e.g., Groq) don't include them in total_tokens
-						totalTokens: input + outputTokens + cachedTokens,
+						totalTokens: input + outputTokens + cachedTokens + cacheWrite,
 						cost: {
 							input: 0,
 							output: 0,
