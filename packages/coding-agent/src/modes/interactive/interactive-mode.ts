@@ -3054,6 +3054,7 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					tensorZeroGateway: this.settingsManager.getTensorZeroGateway(),
 					tensorZeroConfigured: !!process.env.TENSORZERO_GATEWAY_URL,
+					tensorZeroCacheMode: this.settingsManager.getTensorZeroCacheMode(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -3157,9 +3158,18 @@ export class InteractiveMode {
 						this.settingsManager.setTensorZeroGateway(enabled);
 						const tzConfig = getTensorZeroConfig();
 						if (enabled && tzConfig) {
-							this.session.agent.streamFn = createTensorZeroStreamFn(tzConfig);
+							this.session.agent.streamFn = createTensorZeroStreamFn(tzConfig, {
+								cacheMode: this.settingsManager.getTensorZeroCacheMode(),
+							});
 						} else {
 							this.session.agent.streamFn = streamSimple;
+						}
+					},
+					onTensorZeroCacheModeChange: (mode) => {
+						this.settingsManager.setTensorZeroCacheMode(mode);
+						const tzConfig2 = getTensorZeroConfig();
+						if (this.settingsManager.getTensorZeroGateway() && tzConfig2) {
+							this.session.agent.streamFn = createTensorZeroStreamFn(tzConfig2, { cacheMode: mode });
 						}
 					},
 					onCancel: () => {
