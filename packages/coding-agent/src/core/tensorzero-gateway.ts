@@ -110,6 +110,41 @@ function rewriteModelForGateway(model: Model<Api>, config: TensorZeroConfig): Mo
 	};
 }
 
+/**
+ * Check if a model supports Anthropic-style prompt caching (cache_control).
+ * Only Anthropic Claude models support this. Non-Claude models routed through
+ * Anthropic-compatible proxies (e.g. opencode.ai/zen) do not.
+ */
+function supportsAnthropicCaching(model: Model<Api>): boolean {
+	if (model.cost.cacheRead || model.cost.cacheWrite) {
+		return true;
+	}
+	const id = model.id.toLowerCase();
+	if (id.includes("claude")) return true;
+	if (model.provider === "anthropic") return true;
+	return false;
+}
+
+/**
+ * Check if a Bedrock model supports prompt caching.
+ * Only certain Anthropic Claude models support cachePoint on Bedrock.
+ * Other models (Moonshot Kimi, Qwen, etc.) reject cache requests with 403.
+ */
+function supportsBedrockPromptCaching(model: Model<Api>): boolean {
+	if (model.cost.cacheRead || model.cost.cacheWrite) {
+		return true;
+	}
+
+	const id = model.id.toLowerCase();
+	// Claude 4.x models (opus-4, sonnet-4, haiku-4)
+	if (id.includes("claude") && (id.includes("-4-") || id.includes("-4."))) return true;
+	// Claude 3.7 Sonnet
+	if (id.includes("claude-3-7-sonnet")) return true;
+	// Claude 3.5 Haiku
+	if (id.includes("claude-3-5-haiku")) return true;
+	return false;
+}
+
 // ---------------------------------------------------------------------------
 // Provider-level prompt caching via tensorzero::extra_body
 //
@@ -351,12 +386,15 @@ function buildProviderCachePatches(
 
 	// opencode routes its anthropic-messages models to opencode.ai/zen using the
 	// Anthropic Messages format, so the same cache_control patches apply.
+	// Only apply to models that actually support Anthropic caching (not minimax, big-pickle, etc.).
 	if (provider === "anthropic" || (provider === "opencode" && model.api === "anthropic-messages")) {
+		if (!supportsAnthropicCaching(model)) return [];
 		const cacheControl = buildAnthropicCacheControl(cacheRetention, gatewayUrl);
 		return buildAnthropicCachePatches(context, cacheControl);
 	}
 
 	if (provider === "amazon-bedrock") {
+		if (!supportsBedrockPromptCaching(model)) return [];
 		return buildBedrockCachePatches(context);
 	}
 
