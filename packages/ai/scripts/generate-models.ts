@@ -515,6 +515,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					},
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
+					// Non-native openai-compatible models on the Zen endpoint reject the
+					// OpenAI-specific `strict` field on tool definitions.
+					...(api === "openai-completions" && { compat: { supportsStrictMode: false } }),
 				});
 			}
 		}
