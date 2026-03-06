@@ -12,6 +12,7 @@
 
 import {
 	type Api,
+	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type CacheRetention,
 	type Context,
@@ -216,12 +217,25 @@ function computeAnthropicLastMessageInfo(messages: Message[]): { messageIndex: n
 	const relevantMessages = messages.slice(0, endIdx + 1);
 
 	// Count TZ-format messages, coalescing consecutive toolResult runs.
+	// Skip aborted/error assistant messages — transform-messages.ts drops them
+	// before sending to the provider, so TensorZero never sees them. Counting
+	// them here would make the JSON Pointer index too large and cause TZ to
+	// reject the extra_body patch with an out-of-bounds error (e.g. after an
+	// abort+resume where the aborted assistant message sits between two user
+	// messages).
 	let tzCount = 0;
 	let i = 0;
 	while (i < relevantMessages.length) {
-		if (relevantMessages[i].role === "toolResult") {
+		const msg = relevantMessages[i];
+		if (msg.role === "toolResult") {
 			while (i < relevantMessages.length && relevantMessages[i].role === "toolResult") i++;
 			tzCount++;
+		} else if (
+			msg.role === "assistant" &&
+			((msg as AssistantMessage).stopReason === "error" || (msg as AssistantMessage).stopReason === "aborted")
+		) {
+			// Skip: dropped by transform-messages.ts, not forwarded to provider.
+			i++;
 		} else {
 			i++;
 			tzCount++;

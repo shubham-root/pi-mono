@@ -118,7 +118,7 @@ function userMsg(text: string): Message {
 	return { role: "user", content: text, timestamp: 0 };
 }
 
-function assistantMsg(): Message {
+function assistantMsg(stopReason: "stop" | "error" | "aborted" = "stop"): Message {
 	return {
 		role: "assistant",
 		content: [],
@@ -133,7 +133,7 @@ function assistantMsg(): Message {
 			totalTokens: 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
-		stopReason: "stop",
+		stopReason,
 		timestamp: 0,
 	};
 }
@@ -239,6 +239,37 @@ describe("createTensorZeroStreamFn – Anthropic provider-level caching", () => 
 		const opts = capturedOptions as { extraBody: Record<string, unknown> };
 		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{ pointer: string }>;
 		expect(patches.some((p) => p.pointer === "/messages/4/content/0/cache_control")).toBe(true);
+	});
+
+	it("skips aborted assistant message when computing message index (abort+resume scenario)", () => {
+		// Abort+resume: [user, assistant(aborted), user(new)]
+		// transform-messages.ts drops the aborted assistant, so TZ only sees 2 messages (indices 0 and 1).
+		// The cache patch must target /messages/1/..., not /messages/2/... (which would be out-of-bounds).
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		const ctx: Context = {
+			messages: [userMsg("q"), assistantMsg("aborted"), userMsg("q2")],
+		};
+		streamFn(anthropicModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{ pointer: string }>;
+		// Must target index 1 (the new user message), not index 2 (out-of-bounds)
+		expect(patches.some((p) => p.pointer === "/messages/1/content/0/cache_control")).toBe(true);
+		expect(patches.some((p) => p.pointer === "/messages/2/content/0/cache_control")).toBe(false);
+	});
+
+	it("skips error assistant message when computing message index", () => {
+		// Similar to abort: [user, assistant(error), user(retry)]
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		const ctx: Context = {
+			messages: [userMsg("q"), assistantMsg("error"), userMsg("retry")],
+		};
+		streamFn(anthropicModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{ pointer: string }>;
+		expect(patches.some((p) => p.pointer === "/messages/1/content/0/cache_control")).toBe(true);
+		expect(patches.some((p) => p.pointer === "/messages/2/content/0/cache_control")).toBe(false);
 	});
 
 	it("coalesces parallel tool results – message index accounts for grouping", () => {
@@ -374,6 +405,27 @@ describe("createTensorZeroStreamFn – Bedrock provider-level caching", () => {
 
 		const opts = capturedOptions as { extraBody: Record<string, unknown> };
 		expect(opts.extraBody["tensorzero::extra_body"]).toBeUndefined();
+	});
+
+	it("skips aborted assistant when computing bedrock message index (abort+resume scenario)", () => {
+		// The exact error from the bug report:
+		// `Could not find array index 2 in target array (len 2)` with pointer `/messages/2/content/-`
+		// Scenario: [user, assistant(aborted), user(resume)] — aborted assistant is dropped by
+		// transform-messages.ts, so Bedrock only sees 2 messages. Patch must target index 1.
+		if (!bedrockModel) return;
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		const ctx: Context = {
+			systemPrompt: "sys",
+			messages: [userMsg("q"), assistantMsg("aborted"), userMsg("resume")],
+		};
+		streamFn(bedrockModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{ pointer: string; value: unknown }>;
+		expect(patches).toBeDefined();
+		// Must target /messages/1/content/- (not /messages/2/content/-)
+		expect(patches.some((p) => p.pointer === "/messages/1/content/-")).toBe(true);
+		expect(patches.some((p) => p.pointer === "/messages/2/content/-")).toBe(false);
 	});
 });
 
