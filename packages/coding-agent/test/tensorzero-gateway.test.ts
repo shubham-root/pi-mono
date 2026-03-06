@@ -457,6 +457,98 @@ describe("createTensorZeroStreamFn – OpenRouter Anthropic caching", () => {
 	});
 });
 
+describe("createTensorZeroStreamFn – strict-delete patches", () => {
+	beforeEach(() => {
+		capturedModel = undefined;
+		_capturedContext = undefined;
+		capturedOptions = undefined;
+	});
+
+	// Only name/description/parameters are needed — Tool.execute is not part of the pi-ai Tool interface.
+	// Use unknown cast since parameters needs to satisfy TSchema at runtime but we only care about count.
+	const fakeTool = {
+		name: "read",
+		description: "Read a file",
+		parameters: { type: "object", properties: {}, required: [] as string[] },
+	} as unknown as import("@mariozechner/pi-ai").Tool;
+
+	it("emits delete patches for each tool when model has supportsStrictMode:false", () => {
+		// opencode kimi-k2.5 has compat: { supportsStrictMode: false }
+		const kimiModel = getModel("opencode", "kimi-k2.5")!;
+		const ctx: Context = { messages: [], tools: [fakeTool, fakeTool, fakeTool] };
+
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		streamFn(kimiModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{
+			pointer: string;
+			delete?: boolean;
+		}>;
+		expect(patches).toBeDefined();
+		// Three tools → three delete patches
+		const deletePatches = patches.filter((p) => p.delete === true);
+		expect(deletePatches).toHaveLength(3);
+		expect(deletePatches[0].pointer).toBe("/tools/0/function/strict");
+		expect(deletePatches[1].pointer).toBe("/tools/1/function/strict");
+		expect(deletePatches[2].pointer).toBe("/tools/2/function/strict");
+	});
+
+	it("emits no strict-delete patches when model supports strict mode (anthropic)", () => {
+		const ctx: Context = { messages: [], tools: [fakeTool] };
+
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		streamFn(fakeModel, ctx); // fakeModel = anthropic (no supportsStrictMode:false)
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		// No extra_body at all (anthropic uses cache patches via a different path, not here)
+		const patches = opts.extraBody["tensorzero::extra_body"] as
+			| Array<{ pointer: string; delete?: boolean }>
+			| undefined;
+		if (patches) {
+			const deletePatches = patches.filter((p) => p.delete === true);
+			expect(deletePatches).toHaveLength(0);
+		}
+	});
+
+	it("emits no strict-delete patches when there are no tools", () => {
+		const kimiModel = getModel("opencode", "kimi-k2.5")!;
+		const ctx: Context = { messages: [] }; // no tools
+
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		streamFn(kimiModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as
+			| Array<{ pointer: string; delete?: boolean }>
+			| undefined;
+		if (patches) {
+			const deletePatches = patches.filter((p) => p.delete === true);
+			expect(deletePatches).toHaveLength(0);
+		}
+	});
+
+	it("combines strict-delete patches with cache patches in correct order", () => {
+		const kimiModel = getModel("opencode", "kimi-k2.5")!;
+		// Kimi K2.5 is openai-completions so no cache patches apply (not anthropic/bedrock)
+		// Use a context with tools to trigger strict-delete patches
+		const ctx: Context = { messages: [userMsg("hi")], tools: [fakeTool] };
+
+		const streamFn = createTensorZeroStreamFn(fakeConfig);
+		streamFn(kimiModel, ctx);
+
+		const opts = capturedOptions as { extraBody: Record<string, unknown> };
+		const patches = opts.extraBody["tensorzero::extra_body"] as Array<{
+			pointer: string;
+			delete?: boolean;
+		}>;
+		expect(patches).toBeDefined();
+		// All patches should be strict-delete patches (one per tool)
+		expect(patches.every((p) => p.delete === true)).toBe(true);
+		expect(patches[0].pointer).toBe("/tools/0/function/strict");
+	});
+});
+
 describe("TensorZero gateway gating", () => {
 	const originalEnv = process.env.TENSORZERO_GATEWAY_URL;
 
