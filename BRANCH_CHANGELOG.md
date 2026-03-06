@@ -20,7 +20,7 @@ Changes in this branch on top of upstream `main`. Kept here to avoid merge confl
 - Fixed auto-retry leaving a trailing error `AssistantMessage` in agent state when max retries are exhausted.
 - Fixed TensorZero Bedrock cache-patching off-by-one when a trailing error/aborted assistant message was present.
 - Fixed auto-retry incorrectly retrying permanent `400 Bad Request` errors wrapped as `502` by TensorZero.
-- Fixed TensorZero gateway sending `strict: false` in tool definitions to providers that reject the field (e.g. opencode.ai/zen Kimi K2.5). Emits `tensorzero::extra_body` delete patches for models with `compat.supportsStrictMode: false`.
+- Fixed TensorZero gateway sending `strict: false` in tool definitions to providers that reject the field (e.g. opencode.ai/zen Kimi K2.5). Emits `tensorzero::extra_body` delete patches at `/tools/${i}/strict` (the correct TensorZero serialization path) for models with `compat.supportsStrictMode: false`.
 - Fixed TensorZero cache token extraction for AWS Bedrock (camelCase `cacheReadInputTokens`/`cacheWriteInputTokens` raw usage fields).
 - Fixed TensorZero raw usage accumulation: raw_usage entries are now collected across all streaming chunks, not just the final one.
 
