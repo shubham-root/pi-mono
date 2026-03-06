@@ -421,7 +421,7 @@ function buildStrictDeletePatches(model: Model<Api>, context: Context): ExtraBod
 	if (compat?.supportsStrictMode !== false) return [];
 
 	return context.tools.map((_, i) => ({
-		pointer: `/tools/${i}/function/strict`,
+		pointer: `/tools/${i}/strict`,
 		delete: true as const,
 	}));
 }
