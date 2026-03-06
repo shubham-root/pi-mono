@@ -541,9 +541,9 @@ describe("createTensorZeroStreamFn – strict-delete patches", () => {
 		// Three tools → three delete patches
 		const deletePatches = patches.filter((p) => p.delete === true);
 		expect(deletePatches).toHaveLength(3);
-		expect(deletePatches[0].pointer).toBe("/tools/0/function/strict");
-		expect(deletePatches[1].pointer).toBe("/tools/1/function/strict");
-		expect(deletePatches[2].pointer).toBe("/tools/2/function/strict");
+		expect(deletePatches[0].pointer).toBe("/tools/0/strict");
+		expect(deletePatches[1].pointer).toBe("/tools/1/strict");
+		expect(deletePatches[2].pointer).toBe("/tools/2/strict");
 	});
 
 	it("emits no strict-delete patches when model supports strict mode (anthropic)", () => {
@@ -597,7 +597,7 @@ describe("createTensorZeroStreamFn – strict-delete patches", () => {
 		expect(patches).toBeDefined();
 		// All patches should be strict-delete patches (one per tool)
 		expect(patches.every((p) => p.delete === true)).toBe(true);
-		expect(patches[0].pointer).toBe("/tools/0/function/strict");
+		expect(patches[0].pointer).toBe("/tools/0/strict");
 	});
 });
 
