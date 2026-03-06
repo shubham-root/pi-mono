@@ -167,7 +167,8 @@ function supportsBedrockPromptCaching(model: Model<Api>): boolean {
 
 interface ExtraBodyPatch {
 	pointer: string;
-	value: unknown;
+	value?: unknown;
+	delete?: true;
 }
 
 /**
@@ -200,12 +201,26 @@ function buildAnthropicCacheControl(retention: CacheRetention, gatewayUrl: strin
 function computeAnthropicLastMessageInfo(messages: Message[]): { messageIndex: number; contentIndex: number } | null {
 	if (messages.length === 0) return null;
 
+	// Find the last non-assistant message index. TensorZero does not include a
+	// trailing assistant message in the Anthropic-format request body (it only
+	// appears when the conversation ends with a user/tool-result turn). A stale
+	// error assistant message left over from a failed previous turn must not be
+	// counted; including it would make the pointer one position too large and
+	// cause TZ to reject the extra_body patches with an out-of-bounds error.
+	let endIdx = messages.length - 1;
+	while (endIdx >= 0 && messages[endIdx].role === "assistant") {
+		endIdx--;
+	}
+	if (endIdx < 0) return null;
+
+	const relevantMessages = messages.slice(0, endIdx + 1);
+
 	// Count TZ-format messages, coalescing consecutive toolResult runs.
 	let tzCount = 0;
 	let i = 0;
-	while (i < messages.length) {
-		if (messages[i].role === "toolResult") {
-			while (i < messages.length && messages[i].role === "toolResult") i++;
+	while (i < relevantMessages.length) {
+		if (relevantMessages[i].role === "toolResult") {
+			while (i < relevantMessages.length && relevantMessages[i].role === "toolResult") i++;
 			tzCount++;
 		} else {
 			i++;
@@ -216,13 +231,13 @@ function computeAnthropicLastMessageInfo(messages: Message[]): { messageIndex: n
 	const messageIndex = tzCount - 1;
 
 	// Determine contentIndex: how many content blocks does the last TZ message have?
-	const lastMsg = messages[messages.length - 1];
+	const lastMsg = relevantMessages[relevantMessages.length - 1];
 
 	if (lastMsg.role === "toolResult") {
 		// Count how many consecutive toolResult messages form the last TZ user message.
 		let toolCount = 0;
-		let j = messages.length - 1;
-		while (j >= 0 && messages[j].role === "toolResult") {
+		let j = relevantMessages.length - 1;
+		while (j >= 0 && relevantMessages[j].role === "toolResult") {
 			toolCount++;
 			j--;
 		}
@@ -235,7 +250,7 @@ function computeAnthropicLastMessageInfo(messages: Message[]): { messageIndex: n
 		return { messageIndex, contentIndex: Math.max(0, content.length - 1) };
 	}
 
-	// Last message is an assistant message – shouldn't happen in normal pi flow.
+	// Shouldn't happen given the endIdx loop above.
 	return null;
 }
 
@@ -369,6 +384,35 @@ function buildContentArrayWithCacheControl(
 }
 
 /**
+ * Build tensorzero::extra_body delete patches to strip the `strict` field from
+ * every tool definition in the forwarded provider request.
+ *
+ * TensorZero's OpenAI-compatible endpoint injects `"strict": false` into every
+ * tool's `function` object before forwarding to the upstream provider (per the
+ * TZ API spec: strict "defaults to false"). Providers that do not recognise the
+ * `strict` field (e.g. opencode.ai/zen non-OpenAI models like Kimi K2.5) reject
+ * the request with a 400 Bad Request.
+ *
+ * When the original model has `compat.supportsStrictMode === false` and tools
+ * are present, emit one delete patch per tool to remove the injected field.
+ */
+function buildStrictDeletePatches(model: Model<Api>, context: Context): ExtraBodyPatch[] {
+	if (!context.tools || context.tools.length === 0) return [];
+
+	// Only patch when the original model explicitly opts out of strict mode.
+	// We access compat via a runtime cast because the TypeScript type only exposes
+	// compat for openai-completions / openai-responses APIs, but the value is
+	// present at runtime for any model that has it set in models.generated.ts.
+	const compat = (model as { compat?: { supportsStrictMode?: boolean } }).compat;
+	if (compat?.supportsStrictMode !== false) return [];
+
+	return context.tools.map((_, i) => ({
+		pointer: `/tools/${i}/function/strict`,
+		delete: true as const,
+	}));
+}
+
+/**
  * Compute the tensorzero::extra_body patches needed to enable provider-level
  * prompt caching for the given model, context, and cache-retention setting.
  *
@@ -494,11 +538,18 @@ export function createTensorZeroStreamFn(
 		// still have the original provider name available via `model.provider`.
 		const retention = resolveCacheRetention(streamOptions?.cacheRetention);
 		const cachePatches = buildProviderCachePatches(model, context, retention, config.gatewayUrl);
-		if (cachePatches.length > 0) {
+
+		// Inject strict-delete patches for providers that don't support the `strict`
+		// field. TZ injects `strict: false` into every tool before forwarding;
+		// providers like opencode.ai/zen reject it with 400 Bad Request.
+		const strictDeletePatches = buildStrictDeletePatches(model, context);
+
+		const allExtraBodyPatches = [...cachePatches, ...strictDeletePatches];
+		if (allExtraBodyPatches.length > 0) {
 			const existing = extraBody["tensorzero::extra_body"];
 			const existingPatches: ExtraBodyPatch[] = Array.isArray(existing) ? existing : [];
-			// Caller-supplied patches take precedence; provider cache patches come first.
-			extraBody["tensorzero::extra_body"] = [...cachePatches, ...existingPatches];
+			// Caller-supplied patches take precedence; provider patches come first.
+			extraBody["tensorzero::extra_body"] = [...allExtraBodyPatches, ...existingPatches];
 		}
 
 		const mergedOptions: SimpleStreamOptions = {

@@ -2228,6 +2228,12 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
+
+		// 400 Bad Request is a permanent client-side error (e.g. unsupported tool field,
+		// invalid request schema). Retrying will never help. TensorZero wraps these as
+		// 502 with the inner status in the message body; detect and bail out early.
+		if (/400 Bad Request/i.test(err)) return false;
+
 		// Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection errors, fetch failed, terminated, retry delay exceeded
 		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i.test(
 			err,
@@ -2251,6 +2257,16 @@ export class AgentSession {
 			this._retryPromise = new Promise((resolve) => {
 				this._retryResolve = resolve;
 			});
+		}
+
+		// Always remove the error message from agent state before deciding whether to
+		// retry. This ensures the trailing error assistant message is never left in
+		// the context even when max retries are exceeded, which would otherwise cause
+		// downstream issues such as off-by-one errors in cache-patching pointer
+		// computation (e.g. tensorzero::extra_body Bedrock patches).
+		const stateMessages = this.agent.state.messages;
+		if (stateMessages.length > 0 && stateMessages[stateMessages.length - 1].role === "assistant") {
+			this.agent.replaceMessages(stateMessages.slice(0, -1));
 		}
 
 		this._retryAttempt++;
@@ -2277,12 +2293,6 @@ export class AgentSession {
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
 		});
-
-		// Remove error message from agent state (keep in session for history)
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.replaceMessages(messages.slice(0, -1));
-		}
 
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
