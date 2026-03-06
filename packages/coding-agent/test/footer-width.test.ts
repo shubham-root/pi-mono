@@ -67,6 +67,7 @@ function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
 			void callback;
 			return () => {};
 		},
+		getTensorZeroActive: () => false,
 	};
 
 	return provider;

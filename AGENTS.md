@@ -94,10 +94,16 @@ tmux kill-session -t pi-test
 - Technical prose only, be kind but direct (e.g., "Thanks @user" not "Thanks so much @user!")
 
 ## Changelog
-Location: `packages/*/CHANGELOG.md` (each package has its own)
+
+**This branch (`our.pi`) uses `BRANCH_CHANGELOG.md` in the repo root instead of `packages/*/CHANGELOG.md`.**
+This avoids merge conflicts when rebasing onto upstream, since upstream continuously modifies the package changelogs.
+
+- All changes made on this branch MUST be documented in `BRANCH_CHANGELOG.md` under `## Unreleased`.
+- NEVER touch `packages/*/CHANGELOG.md` for branch-specific changes.
+- Use the same section headers (`### Fixed`, `### Added`, `### Changed`, etc.) as described below.
 
 ### Format
-Use these sections under `## [Unreleased]`:
+Use these sections under `## Unreleased`:
 - `### Breaking Changes` - API changes requiring migration
 - `### Added` - New features
 - `### Changed` - Changes to existing functionality
@@ -105,11 +111,9 @@ Use these sections under `## [Unreleased]`:
 - `### Removed` - Removed features
 
 ### Rules
-- Before adding entries, read the full `[Unreleased]` section to see which subsections already exist
-- New entries ALWAYS go under `## [Unreleased]` section
+- Before adding entries, read the `## Unreleased` section to see which subsections already exist
+- New entries ALWAYS go under `## Unreleased`
 - Append to existing subsections (e.g., `### Fixed`), do not create duplicates
-- NEVER modify already-released version sections (e.g., `## [0.12.2]`)
-- Each version section is immutable once released
 
 ### Attribution
 - **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/badlogic/pi-mono/issues/123))`
