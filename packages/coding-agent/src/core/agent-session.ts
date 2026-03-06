@@ -2410,6 +2410,16 @@ export class AgentSession {
 			});
 		}
 
+		// Always remove the error message from agent state before deciding whether to
+		// retry. This ensures the trailing error assistant message is never left in
+		// the context even when max retries are exceeded, which would otherwise cause
+		// downstream issues such as off-by-one errors in cache-patching pointer
+		// computation (e.g. tensorzero::extra_body Bedrock patches).
+		const stateMessages = this.agent.state.messages;
+		if (stateMessages.length > 0 && stateMessages[stateMessages.length - 1].role === "assistant") {
+			this.agent.replaceMessages(stateMessages.slice(0, -1));
+		}
+
 		this._retryAttempt++;
 
 		if (this._retryAttempt > settings.maxRetries) {
