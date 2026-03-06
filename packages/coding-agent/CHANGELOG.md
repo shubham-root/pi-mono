@@ -5,6 +5,10 @@
 ### Fixed
 
 - Fixed TensorZero gateway session resuming: wrap the output stream to restore the original model `id` and `api` in every `AssistantMessage` before it is persisted. Previously the TZ-internal rewritten values (`tensorzero::model_name::...` and `openai-completions`) were stored, causing model restoration to silently fail on resume (model not found in registry) and breaking `isSameModel` checks in `transform-messages.ts`, which stripped thinking signatures when switching between TZ and direct provider access.
+- Fixed auto-retry leaving a trailing error `AssistantMessage` in agent state when max retries are exhausted. The error message is now removed before the max-retries check so the context is always clean, preventing downstream issues such as off-by-one errors in TensorZero Bedrock cache-patching pointer computation (`/messages/N/content/-` targeting a non-existent index).
+- Fixed TensorZero Bedrock cache-patching off-by-one: `computeAnthropicLastMessageInfo` now skips trailing assistant messages when computing the pointer, matching TensorZero's own message-count behaviour.
+- Fixed auto-retry incorrectly retrying permanent `400 Bad Request` errors (e.g. unsupported `strict` tool field) that TensorZero wraps as `502`. A `400 Bad Request` inside an error message now short-circuits the retry check.
+- Fixed TensorZero gateway sending `strict: false` in tool definitions to providers that reject the field (e.g. opencode.ai/zen Kimi K2.5). TZ injects `strict: false` by default when forwarding; pi now emits `tensorzero::extra_body` delete patches to strip it for models with `compat.supportsStrictMode: false`.
 
 ## [0.56.2] - 2026-03-05
 
