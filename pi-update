@@ -65,6 +65,9 @@ git push --force-with-lease origin "$BRANCH"
 # -------------------------------------------------------------------
 # 2. Build all packages
 # -------------------------------------------------------------------
+echo "==> Removing stale nested @mariozechner packages (workspace will re-link them)..."
+find "$REPO_DIR/packages" -path "*/node_modules/@mariozechner" -not -type l -exec rm -rf {} + 2>/dev/null || true
+
 echo "==> Installing dependencies..."
 npm install
 
