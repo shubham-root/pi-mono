@@ -39,6 +39,26 @@ fi
 
 echo "==> Rebase complete."
 
+# -------------------------------------------------------------------
+# Sync package versions from upstream/main so the installed binary
+# reports the correct version (our branch commits can pin an older
+# version number, causing spurious "Update Available" notifications).
+# -------------------------------------------------------------------
+UPSTREAM_VERSION=$(git show upstream/main:packages/coding-agent/package.json 2>/dev/null \
+    | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+
+if [ -n "$UPSTREAM_VERSION" ]; then
+    echo "==> Syncing package versions to upstream v${UPSTREAM_VERSION}..."
+    for pkg_json in packages/*/package.json; do
+        if grep -q '"version"' "$pkg_json"; then
+            sed -i.bak "s/\"version\": \".*\"/\"version\": \"${UPSTREAM_VERSION}\"/" "$pkg_json" \
+                && rm -f "${pkg_json}.bak"
+        fi
+    done
+else
+    echo "WARNING: Could not determine upstream version; skipping version sync." >&2
+fi
+
 echo "==> Pushing rebased branch to origin (force-with-lease)..."
 git push --force-with-lease origin "$BRANCH"
 

@@ -823,7 +823,7 @@ export const MODELS = {
 		} satisfies Model<"bedrock-converse-stream">,
 		"mistral.devstral-2-123b": {
 			id: "mistral.devstral-2-123b",
-			name: "Devstral 2 123B",
+			name: "Devstral 2 135B",
 			api: "bedrock-converse-stream",
 			provider: "amazon-bedrock",
 			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -837,23 +837,6 @@ export const MODELS = {
 			},
 			contextWindow: 256000,
 			maxTokens: 8192,
-		} satisfies Model<"bedrock-converse-stream">,
-		"mistral.magistral-small-2509": {
-			id: "mistral.magistral-small-2509",
-			name: "Magistral Small 1.2",
-			api: "bedrock-converse-stream",
-			provider: "amazon-bedrock",
-			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
-			reasoning: true,
-			input: ["text", "image"],
-			cost: {
-				input: 0.5,
-				output: 1.5,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 128000,
-			maxTokens: 40000,
 		} satisfies Model<"bedrock-converse-stream">,
 		"mistral.ministral-3-14b-instruct": {
 			id: "mistral.ministral-3-14b-instruct",
@@ -6214,6 +6197,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
+			compat: {"supportsStrictMode":false},
 			reasoning: true,
 			input: ["text"],
 			cost: {
@@ -6224,7 +6208,6 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
-			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"gpt-5": {
 			id: "gpt-5",
@@ -6470,6 +6453,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
+			compat: {"supportsStrictMode":false},
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -6480,7 +6464,24 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
-			compat: { supportsStrictMode: false },
+		} satisfies Model<"openai-completions">,
+		"mimo-v2-flash-free": {
+			id: "mimo-v2-flash-free",
+			name: "MiMo V2 Flash Free",
+			api: "openai-completions",
+			provider: "opencode",
+			baseUrl: "https://opencode.ai/zen/v1",
+			compat: {"supportsStrictMode":false},
+			reasoning: true,
+			input: ["text"],
+			cost: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+			},
+			contextWindow: 262144,
+			maxTokens: 65536,
 		} satisfies Model<"openai-completions">,
 		"mimo-v2-omni-free": {
 			id: "mimo-v2-omni-free",
@@ -6522,6 +6523,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
+			compat: {"supportsStrictMode":false},
 			reasoning: true,
 			input: ["text"],
 			cost: {
@@ -6532,7 +6534,6 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
-			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5-free": {
 			id: "minimax-m2.5-free",
@@ -6551,13 +6552,14 @@ export const MODELS = {
 			contextWindow: 204800,
 			maxTokens: 131072,
 		} satisfies Model<"anthropic-messages">,
-		"trinity-large-preview-free": {
-			id: "trinity-large-preview-free",
-			name: "Trinity Large Preview",
+		"nemotron-3-super-free": {
+			id: "nemotron-3-super-free",
+			name: "Nemotron 3 Super Free",
 			api: "openai-completions",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
-			reasoning: false,
+			compat: {"supportsStrictMode":false},
+			reasoning: true,
 			input: ["text"],
 			cost: {
 				input: 0,
@@ -6565,9 +6567,8 @@ export const MODELS = {
 				cacheRead: 0,
 				cacheWrite: 0,
 			},
-			contextWindow: 131072,
-			maxTokens: 131072,
-			compat: { supportsStrictMode: false },
+			contextWindow: 1000000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 	},
 	"opencode-go": {
@@ -6577,6 +6578,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
+			compat: {"supportsStrictMode":false},
 			reasoning: true,
 			input: ["text"],
 			cost: {
@@ -6587,7 +6589,6 @@ export const MODELS = {
 			},
 			contextWindow: 204800,
 			maxTokens: 131072,
-			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"kimi-k2.5": {
 			id: "kimi-k2.5",
@@ -6595,6 +6596,7 @@ export const MODELS = {
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
+			compat: {"supportsStrictMode":false},
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -6605,7 +6607,6 @@ export const MODELS = {
 			},
 			contextWindow: 262144,
 			maxTokens: 65536,
-			compat: { supportsStrictMode: false },
 		} satisfies Model<"openai-completions">,
 		"minimax-m2.5": {
 			id: "minimax-m2.5",
@@ -7332,13 +7333,13 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.25,
-				output: 0.39999999999999997,
-				cacheRead: 0,
+				input: 0.26,
+				output: 0.38,
+				cacheRead: 0.13,
 				cacheWrite: 0,
 			},
 			contextWindow: 163840,
-			maxTokens: 65536,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v3.2-exp": {
 			id: "deepseek/deepseek-v3.2-exp",
@@ -10188,7 +10189,7 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
-				input: 0.049999999999999996,
+				input: 0.09999999999999999,
 				output: 0.15,
 				cacheRead: 0,
 				cacheWrite: 0,
