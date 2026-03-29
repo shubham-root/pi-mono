@@ -371,9 +371,9 @@ export class AgentSession {
 			try {
 				return await runner.emitToolCall({
 					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
+					toolName: context.toolCall.name,
+					toolCallId: context.toolCall.id,
+					input: context.args as Record<string, unknown>,
 				});
 			} catch (err) {
 				if (err instanceof Error) {
@@ -391,15 +391,15 @@ export class AgentSession {
 
 			const hookResult = await runner.emitToolResult({
 				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content: result.content,
-				details: isError ? undefined : result.details,
-				isError,
+				toolName: context.toolCall.name,
+				toolCallId: context.toolCall.id,
+				input: context.args as Record<string, unknown>,
+				content: context.result.content,
+				details: context.isError ? undefined : context.result.details,
+				isError: context.isError,
 			});
 
-			if (!hookResult || isError) {
+			if (!hookResult || context.isError) {
 				return undefined;
 			}
 

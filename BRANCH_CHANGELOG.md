@@ -8,8 +8,10 @@ Changes in this branch on top of upstream `main`. Kept here to avoid merge confl
 
 ### Fixed
 
+- Fixed build failures after rebasing onto upstream v0.58.3: updated agent hook callbacks to use context parameter instead of destructured parameters, removed nested `node_modules/@mariozechner` directories that shadowed workspace symlinks, and added type assertions for tree navigation keybindings
+- Fixed `pi-update` version sync to update both package versions and internal dependency versions (`@mariozechner/pi-*`), preventing npm from installing old published versions instead of using workspace symlinks
 - Fixed spurious "Update Available" notifications after `pi-update`: version numbers in all `packages/*/package.json` are now synced to the upstream version after each rebase, so the installed binary reports the correct version.
-- Fixed `pi-update` build failures caused by stale nested `node_modules/@mariozechner` copies in individual packages shadowing the workspace symlinks; `pi-update` now removes them before installing.
+- Fixed `pi-update` build failures caused by stale nested `node_modules/@mariozechner` copies in individual packages shadowing the workspace symlinks; `pi-update` now removes them and cleans package-lock.json before installing.
 - Fixed TensorZero abort+resume causing `502` errors from Bedrock and other providers: `computeAnthropicLastMessageInfo` now skips aborted/error assistant messages when computing the `tensorzero::extra_body` JSON Pointer index, matching what `transform-messages.ts` does when building the provider request. Previously, an aborted session left a trailing assistant message in the conversation history; when the user resumed and sent a new prompt, the pointer targeted a message index that didn't exist in the provider's request body (e.g. `/messages/2/content/-` on a 2-element array).
 
 ---

@@ -55,6 +55,14 @@ if [ -n "$UPSTREAM_VERSION" ]; then
                 && rm -f "${pkg_json}.bak"
         fi
     done
+    
+    # Also update internal dependency versions to match
+    for pkg_json in packages/*/package.json; do
+        sed -i.bak "s/\"@mariozechner\/pi-agent-core\": \"\^[0-9.]*\"/\"@mariozechner\/pi-agent-core\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && sed -i.bak "s/\"@mariozechner\/pi-ai\": \"\^[0-9.]*\"/\"@mariozechner\/pi-ai\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && sed -i.bak "s/\"@mariozechner\/pi-tui\": \"\^[0-9.]*\"/\"@mariozechner\/pi-tui\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && rm -f "${pkg_json}.bak"
+    done
 else
     echo "WARNING: Could not determine upstream version; skipping version sync." >&2
 fi
@@ -66,7 +74,16 @@ git push --force-with-lease origin "$BRANCH"
 # 2. Build all packages
 # -------------------------------------------------------------------
 echo "==> Removing stale nested @mariozechner packages (workspace will re-link them)..."
-find "$REPO_DIR/packages" -path "*/node_modules/@mariozechner" -not -type l -exec rm -rf {} + 2>/dev/null || true
+# Remove nested node_modules/@mariozechner directories that shadow workspace symlinks
+find "$REPO_DIR/packages" -type d -path "*/node_modules/@mariozechner" | while read dir; do
+    if [ ! -L "$dir" ]; then
+        echo "  Removing $dir"
+        rm -rf "$dir"
+    fi
+done
+
+echo "==> Cleaning package-lock.json and node_modules..."
+rm -rf "$REPO_DIR/node_modules" "$REPO_DIR/package-lock.json"
 
 echo "==> Installing dependencies..."
 npm install
