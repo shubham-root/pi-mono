@@ -371,9 +371,9 @@ export class AgentSession {
 			try {
 				return await runner.emitToolCall({
 					type: "tool_call",
-					toolName: context.toolCall.name,
-					toolCallId: context.toolCall.id,
-					input: context.args as Record<string, unknown>,
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
 				});
 			} catch (err) {
 				if (err instanceof Error) {
@@ -391,15 +391,15 @@ export class AgentSession {
 
 			const hookResult = await runner.emitToolResult({
 				type: "tool_result",
-				toolName: context.toolCall.name,
-				toolCallId: context.toolCall.id,
-				input: context.args as Record<string, unknown>,
-				content: context.result.content,
-				details: context.isError ? undefined : context.result.details,
-				isError: context.isError,
+				toolName: toolCall.name,
+				toolCallId: toolCall.id,
+				input: args as Record<string, unknown>,
+				content: result.content,
+				details: isError ? undefined : result.details,
+				isError,
 			});
 
-			if (!hookResult || context.isError) {
+			if (!hookResult || isError) {
 				return undefined;
 			}
 
@@ -2417,7 +2417,7 @@ export class AgentSession {
 		// computation (e.g. tensorzero::extra_body Bedrock patches).
 		const stateMessages = this.agent.state.messages;
 		if (stateMessages.length > 0 && stateMessages[stateMessages.length - 1].role === "assistant") {
-			this.agent.replaceMessages(stateMessages.slice(0, -1));
+			this.agent.state.messages = stateMessages.slice(0, -1);
 		}
 
 		this._retryAttempt++;

@@ -151,6 +151,16 @@ export class FooterDataProvider {
 		this.availableProviderCount = count;
 	}
 
+	/** Whether TensorZero gateway is active */
+	getTensorZeroActive(): boolean {
+		return this.tensorZeroActive;
+	}
+
+	/** Internal: update TensorZero gateway status */
+	setTensorZeroActive(active: boolean): void {
+		this.tensorZeroActive = active;
+	}
+
 	setCwd(cwd: string): void {
 		if (this.cwd === cwd) {
 			return;
