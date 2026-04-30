@@ -121,6 +121,13 @@ pi-rs/
 │           ├── interactive.rs
 │           ├── rpc.rs
 │           └── print.rs
+│   ┌── pi-server/                # Daemon: multi-session, IPC, cross-session bus
+│   │   └── src/
+│   │       ├── main.rs           # Daemon entry point
+│   │       ├── ipc.rs            # Unix socket server, protocol frames
+│   │       ├── session_mgr.rs    # Session pool, lifecycle
+│   │       ├── session_bus.rs    # Cross-session message bus
+│   │       └── coordinator.rs    # /delegate, /parallel patterns
 ├── plugins/                      # Example/built-in plugins
 │   ├── hello/
 │   │   ├── Cargo.toml
@@ -265,6 +272,8 @@ pub enum Permission {
     LlmAccess,
     /// Send messages to other plugins
     InterPluginComms,
+    /// Access and communicate with other sessions (create, send, kill)
+    CrossSessionAccess,
 }
 ```
 

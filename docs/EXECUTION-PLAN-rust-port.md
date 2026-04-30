@@ -728,7 +728,174 @@ Enable Neovim-style runtime plugin management: load, unload, and reload plugins 
 
 ---
 
-## Phase 5: Remaining Providers & Feature Parity (Weeks 21-26)
+## Phase 5: Multi-Session Daemon & Cross-Session Communication (Weeks 21-26)
+
+### Architecture
+
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│                        pi-server (daemon process)                       │
+│                                                                        │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │                      Session Manager                             │  │
+│  │  sessions: HashMap<SessionId, SessionHandle>                     │  │
+│  │  bus: CrossSessionBus (broadcast + directed messages)            │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────┐  │
+│  │  Session A   │  │  Session B   │  │  Session C   │  │  ...    │  │
+│  │  agent loop  │  │  agent loop  │  │  agent loop  │  │         │  │
+│  │  plugins     │  │  plugins     │  │  plugins     │  │         │  │
+│  │  tools       │  │  tools       │  │  tools       │  │         │  │
+│  │  cwd: /proj  │  │  cwd: /lib   │  │  cwd: /proj  │  │         │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  └─────────┘  │
+│                                                                        │
+├────────────────────────────────────────────────────────────────────────┤
+│  IPC Server (Unix socket: ~/.local/share/pi/daemon.sock)               │
+└────────────────────┬───────────────────────────┬──────────────────────┘
+                     │                           │
+              ┌──────┴───────┐            ┌──────┴───────┐
+              │  pi attach A │            │  pi attach B │
+              │  (terminal)  │            │  (terminal)  │
+              └──────────────┘            └──────────────┘
+```
+
+### 5.1 Daemon Process (`pi-server/src/main.rs`)
+**Deps**: Phase 2, Phase 3 complete | **Effort**: 4 days
+
+- [ ] `pi server start` — start daemon in background (daemonize, write PID file)
+- [ ] `pi server stop` — graceful shutdown (persist all sessions, then exit)
+- [ ] `pi server status` — check if daemon is running
+- [ ] Auto-start: if no daemon running when `pi` is invoked, start one implicitly
+- [ ] Single-instance enforcement: PID file + socket liveness check
+- [ ] Graceful shutdown on SIGTERM/SIGINT: persist all session state, unload plugins, exit
+- [ ] Crash recovery: on restart, detect persisted sessions and offer resurrection
+- [ ] Logging: daemon logs to `~/.local/share/pi/logs/daemon.log`
+
+**Acceptance**: `pi server start` spawns a background process; `pi server status` reports it running; `pi server stop` shuts it down cleanly.
+
+### 5.2 IPC Protocol (`pi-server/src/ipc.rs`)
+**Deps**: 5.1 | **Effort**: 3 days
+
+- [ ] Unix domain socket server (Linux/macOS) + named pipe (Windows)
+- [ ] Protocol: length-prefixed protobuf frames over the socket
+- [ ] Client commands:
+  - `CreateSession { name, cwd, model }` → `SessionId`
+  - `ListSessions` → `Vec<SessionInfo>`
+  - `AttachSession { id }` → start streaming TUI frames
+  - `DetachSession { id }` → stop streaming, session keeps running
+  - `KillSession { id }` → abort + unload + persist + remove
+  - `SessionPrompt { id, content }` → send user message without attaching
+  - `SessionAbort { id }` → abort current turn
+  - `CrossSessionMessage { from, to, payload }` → deliver to target session
+  - `BroadcastMessage { from, payload }` → deliver to all sessions
+- [ ] TUI streaming: daemon renders to virtual buffer, streams diff frames to attached client
+- [ ] Multiple clients can attach to same session (read-only observers + one active writer)
+- [ ] Heartbeat: client sends keepalive, daemon detaches stale clients after 30s
+
+**Acceptance**: Two terminals can attach to same session; messages typed in one appear in both.
+
+### 5.3 Client: Attach/Detach (`pi-cli/src/client.rs`)
+**Deps**: 5.2 | **Effort**: 3 days
+
+- [ ] `pi new [name] [--cwd path] [--model id]` — create + attach to new session
+- [ ] `pi attach <name_or_id>` — connect terminal to existing session
+- [ ] `pi detach` (or keybinding Ctrl+Shift+D) — disconnect, session continues running
+- [ ] `pi list` / `pi ls` — show all sessions (name, status, model, cwd, age, attached?)
+- [ ] `pi kill <name_or_id>` — terminate a session
+- [ ] `pi rename <old> <new>` — rename a session
+- [ ] When attaching: client enters raw mode, proxies input to daemon, renders received frames
+- [ ] When detaching: restore terminal, print "detached from session X"
+- [ ] If only one session exists, `pi` with no args attaches to it
+- [ ] If no sessions exist, `pi` creates a default session and attaches
+- [ ] Session picker: if multiple sessions exist and no name given, show selector
+
+**Acceptance**: `pi new research`, switch terminal, `pi attach research` — same session, seamless.
+
+### 5.4 Session Lifecycle & Persistence (`pi-server/src/session_lifecycle.rs`)
+**Deps**: 5.1, 2.13 | **Effort**: 3 days
+
+- [ ] Each session has independent: agent state, tool set, plugins, CWD, model, settings
+- [ ] Sessions run their agent loop on separate tokio tasks (true concurrency)
+- [ ] Headless sessions: agent continues working even when no terminal is attached
+- [ ] Session serialization on shutdown: save full JSONL + metadata (model, plugins, cwd)
+- [ ] Session resurrection on daemon restart: reload from persisted state
+- [ ] Session auto-naming: use LLM-generated name from first user message (async, non-blocking)
+- [ ] Session limits: configurable max concurrent sessions (default: 16)
+- [ ] Idle session eviction: optionally persist and unload sessions idle for >N minutes
+
+**Acceptance**: Kill daemon mid-session; restart; `pi attach` resumes where it left off.
+
+### 5.5 Cross-Session Communication Bus (`pi-server/src/session_bus.rs`)
+**Deps**: 5.1, 5.4 | **Effort**: 4 days
+
+- [ ] `CrossSessionBus`: in-process message bus between sessions
+- [ ] Directed messages: Session A sends message to Session B by name/ID
+- [ ] Broadcast: Session A sends to all other sessions
+- [ ] Message types:
+  - `TextMessage { from, content }` — appears as a system message in the target session
+  - `TaskRequest { from, task, context }` — asks target session to perform work
+  - `TaskResult { from, request_id, result }` — response to a TaskRequest
+  - `DataShare { from, key, value }` — publish data other sessions can read
+  - `Signal { from, signal_type }` — lightweight notification (e.g., "I'm done")
+- [ ] Message delivery: async, queued if target session is busy (delivered between turns)
+- [ ] Message persistence: cross-session messages are recorded in both sessions' JSONL logs
+- [ ] Dead letter handling: if target session doesn't exist, return error to sender
+
+**Acceptance**: Session "coordinator" sends TaskRequest to session "worker"; worker completes and sends TaskResult back.
+
+### 5.6 Cross-Session Host Functions (Plugin API)
+**Deps**: 5.5, 4.4 | **Effort**: 2 days
+
+- [ ] `pi_list_sessions() -> Vec<SessionInfo>` — plugin can see other sessions
+- [ ] `pi_send_to_session(target_id, message)` — send cross-session message
+- [ ] `pi_broadcast_sessions(message)` — broadcast to all sessions
+- [ ] `pi_create_session(name, cwd, model) -> SessionId` — spawn a new session
+- [ ] `pi_kill_session(id)` — terminate another session
+- [ ] `pi_wait_for_session(id) -> SessionResult` — block until target session completes/idles
+- [ ] New permission: `CrossSessionAccess` — required for all cross-session host functions
+- [ ] New event: `CrossSessionMessage { from_session, payload }` — plugins can subscribe to incoming messages
+
+**Acceptance**: A plugin in session A can spawn session B, send it a task, and receive the result.
+
+### 5.7 Slash Commands for Multi-Session (`pi-modes/src/interactive/commands.rs`)
+**Deps**: 5.3, 5.5 | **Effort**: 2 days
+
+- [ ] `/sessions` — list all sessions (name, status, model, cwd)
+- [ ] `/session new [name] [--cwd path]` — create a new session (stays attached to current)
+- [ ] `/session switch <name>` — detach from current, attach to target
+- [ ] `/session send <name> <message>` — send text to another session
+- [ ] `/session kill <name>` — terminate another session
+- [ ] `/session spawn <task>` — create a new session with a pre-filled prompt, run headless
+- [ ] Keyboard shortcut (Ctrl+Shift+S): quick session switcher overlay
+
+### 5.8 Coordinator Pattern (Built-in) (`pi-core/src/coordinator.rs`)
+**Deps**: 5.5, 5.6 | **Effort**: 3 days
+
+A first-class pattern for parallel agent work:
+
+- [ ] `/delegate <task>` command: creates a sub-session, sends task, waits for result, injects result into current session
+- [ ] `/parallel <task1> | <task2> | <task3>` command: spawn N sub-sessions, run in parallel, collect results
+- [ ] Sub-sessions inherit parent's CWD and model (unless overridden)
+- [ ] Sub-sessions are headless (no terminal attached)
+- [ ] Results from sub-sessions appear as tool results in the parent session
+- [ ] Configurable concurrency limit for parallel work
+- [ ] Timeout per sub-session (default: 5 minutes)
+- [ ] Progress indicator in parent session: "[delegate] 2/3 tasks complete"
+
+**Acceptance**: `/parallel "write tests for auth" | "write tests for payments"` spawns two sessions, both work simultaneously, results appear in the parent when done.
+
+### 5.9 Backward Compatibility: Single-Session Mode
+**Deps**: 5.1-5.3 | **Effort**: 1 day
+
+- [ ] `pi --no-daemon` flag: run in legacy single-process mode (no daemon, no IPC)
+- [ ] Useful for: CI/CD, scripting, environments where daemon is undesirable
+- [ ] Print mode (`--print`) always runs in single-process mode
+- [ ] RPC mode can optionally connect to daemon or run standalone
+
+---
+
+## Phase 6: Remaining Providers & Feature Parity (Weeks 27-32)
 
 ### 5.1 Google/Vertex Provider (`pi-ai/src/providers/google.rs`)
 **Deps**: 1.1, 1.2 | **Effort**: 4 days | **Lines ref**: `google.ts` (500) + `google-vertex.ts` (567) + `google-shared.ts` (354)
@@ -825,7 +992,7 @@ Enable Neovim-style runtime plugin management: load, unload, and reload plugins 
 
 ---
 
-## Phase 6: Plugin Ecosystem & Multi-Language SDKs (Weeks 27-30)
+## Phase 7: Plugin Ecosystem & Multi-Language SDKs (Weeks 33-36)
 
 ### 6.1 Go SDK (`pi-plugin-sdk-go/`)
 **Deps**: 4.1 | **Effort**: 3 days
@@ -935,10 +1102,13 @@ Phase 1.1 (types) ────────────────────�
                                                       ▼                   │
                                                 4.12-4.17 (SDK + plugins + load/unload + isolation) │
                                                                           │
-                                                5.1-5.11 (providers, parity)
+                                                5.1-5.9 (multi-session daemon)
                                                           │
                                                           ▼
-                                                    6.1-6.7 (ecosystem)
+                                                6.1-6.11 (providers, parity)
+                                                          │
+                                                          ▼
+                                                    7.1-7.7 (ecosystem)
 ```
 
 ## Testing Strategy
