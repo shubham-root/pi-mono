@@ -893,6 +893,82 @@ A first-class pattern for parallel agent work:
 - [ ] Print mode (`--print`) always runs in single-process mode
 - [ ] RPC mode can optionally connect to daemon or run standalone
 
+### 5.10 Daemon Control Panel (`pi-cli/src/ctl.rs`)
+**Deps**: 5.2, 5.3, 5.4 | **Effort**: 4 days
+
+A dedicated CLI surface for observing and controlling the daemon and all its sessions from outside any attached session. Think `docker ps` / `systemctl` / `tmux ls` for pi.
+
+#### Session Observation
+- [ ] `pi ps` — list all sessions with live status:
+  ```
+  ID    NAME         STATUS      MODEL            CWD              AGE     ATTACHED
+  a3f2  main         streaming   claude-sonnet-4  /home/user/proj  12m     terminal-1
+  b8c1  research     idle        gpt-5            /home/user/lib   4h      —
+  c4d9  refactor     tool:bash   claude-sonnet-4  /home/user/proj  2m      —
+  e7f3  tests        completed   gemini-2.5-pro   /home/user/proj  8m      —
+  ```
+- [ ] `pi ps --json` — machine-readable output (for scripting / monitoring)
+- [ ] `pi ps --watch` / `pi top` — live-updating dashboard (refreshes every 1s):
+  ```
+  pi daemon • 4 sessions • uptime 4h12m • mem 142MB
+
+  SESSION     STATUS     TOKENS    COST     MODEL            SUBPROCESS
+  main        streaming  48.2k/200k $0.12   claude-sonnet-4  —
+  research    idle       12.1k/128k $0.03   gpt-5            —
+  refactor    tool:bash  31.0k/200k $0.08   claude-sonnet-4  pid:8821 (cargo test)
+  tests       completed  95.0k/200k $0.24   gemini-2.5-pro   —
+
+  [q] quit  [enter] attach  [k] kill  [s] stop subprocess  [d] details
+  ```
+- [ ] `pi inspect <name_or_id>` — detailed session info:
+  - Current model, thinking level, token usage, cost
+  - Loaded plugins and their states (loaded/faulted/disabled)
+  - Active tool execution (if any): tool name, args, duration, subprocess PID
+  - Last N messages summary (one-line per message)
+  - Session file path, creation time, last activity time
+  - Attached clients (terminal PTY info)
+
+#### Session Control
+- [ ] `pi stop <name_or_id>` — graceful stop: abort current turn, persist session, unload plugins, mark as stopped (can be resumed later)
+- [ ] `pi stop <name_or_id> --force` — immediate kill: SIGKILL any subprocesses, drop without waiting for tool completion
+- [ ] `pi stop --all` — stop all sessions gracefully
+- [ ] `pi resume <name_or_id>` — resume a stopped session (reload from persisted state)
+- [ ] `pi kill <name_or_id>` — terminate and delete session state (irreversible)
+- [ ] `pi kill --all` — terminate all sessions
+
+#### Subprocess Management
+- [ ] `pi procs` — list all active subprocesses across all sessions:
+  ```
+  SESSION     TOOL    PID     CMD                  DURATION  MEM
+  refactor    bash    8821    cargo test           34s       210MB
+  main        bash    9102    npm run build        12s       85MB
+  ```
+- [ ] `pi procs kill <pid>` — kill a specific subprocess (sends SIGTERM, then SIGKILL after 5s)
+- [ ] `pi procs kill --session <name>` — kill all subprocesses in a session
+- [ ] Subprocess tracking: daemon maintains PID table for all spawned child processes
+- [ ] Orphan cleanup: on session stop/kill, send SIGTERM to all its child processes, then SIGKILL after grace period
+- [ ] Subprocess tree: kill entire process group (not just immediate child) to handle forking processes
+
+#### Daemon Introspection
+- [ ] `pi server info` — daemon metadata: PID, uptime, memory usage, socket path, log path, version
+- [ ] `pi server logs` — tail daemon log (equivalent to `tail -f ~/.local/share/pi/logs/daemon.log`)
+- [ ] `pi server logs --session <name>` — tail a specific session's log
+- [ ] `pi server gc` — garbage-collect: remove orphaned session files, clear plugin cache, reclaim memory from idle sessions
+
+#### Signals & Integration
+- [ ] `pi signal <name_or_id> <signal_type>` — send a signal to a session (custom event that plugins/agent can react to)
+  - Built-in signals: `pause` (pause agent, queue messages), `resume`, `compact-now`, `reload-plugins`
+- [ ] `pi send <name_or_id> <message>` — inject a user message into a session (without attaching)
+- [ ] `pi send <name_or_id> --steer <message>` — inject a steering message into a running turn
+- [ ] Exit codes for scripting: 0=success, 1=session not found, 2=daemon not running, 3=session busy
+
+**Acceptance**:
+- `pi ps` shows all sessions with real-time status without attaching to any.
+- `pi stop refactor` aborts the current turn, kills subprocess pid:8821, persists state, session can be resumed later.
+- `pi top` shows live-updating dashboard, pressing `k` on a session kills it.
+- `pi procs kill 8821` kills a runaway subprocess without stopping the entire session.
+- `pi send research "also check the auth module"` injects a message into a headless session.
+
 ---
 
 ## Phase 6: Remaining Providers & Feature Parity (Weeks 27-32)
