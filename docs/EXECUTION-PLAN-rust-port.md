@@ -513,11 +513,12 @@ The foundation. Everything else depends on being able to talk to an LLM.
 **Deps**: 4.1 | **Effort**: 3 days
 
 - [ ] Initialize wasmtime `Engine` with fuel metering (prevent infinite loops)
-- [ ] Configure memory limits per plugin
+- [ ] Configure memory limits per plugin (default 64MB linear memory cap)
 - [ ] Load `.wasm` file, validate module
 - [ ] Instantiate with host function linker
 - [ ] Call plugin `load()` export
 - [ ] Maintain plugin instance pool (multiple plugins loaded simultaneously)
+- [ ] Each plugin gets its own `Store` (no shared state between plugin WASM instances)
 
 **Acceptance**: Can load and instantiate a minimal .wasm plugin.
 
@@ -592,8 +593,75 @@ The foundation. Everything else depends on being able to talk to an LLM.
 
 - [ ] When agent emits event, serialize to protobuf
 - [ ] Dispatch to all plugins subscribed to that event type
-- [ ] Handle plugin errors (log, don't crash host)
-- [ ] Handle plugin fuel exhaustion (timeout)
+- [ ] Each plugin dispatch is independent (failure in one does not block others)
+- [ ] Dispatch order: deterministic (load order), but never guaranteed to plugins
+
+### 4.17 Fault Isolation, Reporting & Recovery (`pi-plugin-host/src/isolation.rs`)
+**Deps**: 4.3, 4.4, 4.11 | **Effort**: 4 days
+
+Ensure a buggy or malicious plugin can never crash the host, corrupt other plugins, or degrade the user experience silently.
+
+#### Memory Isolation
+- [ ] Each plugin instance has its own wasmtime `Store` with separate linear memory
+- [ ] Plugins cannot reference, read, or write another plugin's memory (enforced by WASM spec)
+- [ ] Configure per-plugin memory ceiling (`max_memory_bytes` in manifest, default 64MB)
+- [ ] If a plugin exceeds memory limit, wasmtime traps immediately → host catches the trap
+- [ ] Host-side data passed to plugins is copied (serialized protobuf), never shared references
+
+#### CPU / Execution Isolation
+- [ ] Fuel metering: each plugin call gets a fuel budget (configurable, default 1B instructions)
+- [ ] If fuel exhausted, wasmtime traps → host catches and reports timeout
+- [ ] Wall-clock timeout per plugin call (default 30s for event handlers, 120s for tool execution)
+- [ ] Implemented via `tokio::time::timeout` wrapping the synchronous WASM call on a blocking task
+- [ ] Infinite loops in plugins are impossible: fuel runs out deterministically
+
+#### Fault Handling & Recovery
+- [ ] All plugin calls (`on_event`, `pipe`, tool execution) wrapped in `catch_unwind` + wasmtime trap handling
+- [ ] On trap/panic: log error with plugin name, event type, and trap message
+- [ ] Plugin enters `Faulted` state after a trap (not immediately unloaded)
+- [ ] Faulted plugins are skipped for subsequent event dispatch
+- [ ] Configurable fault policy per plugin (in manifest or global settings):
+  - `fault_policy = "restart"` → auto-reload .wasm after fault (with backoff: 1s, 5s, 30s, give up)
+  - `fault_policy = "disable"` → mark disabled, require manual `/plugin reload`
+  - `fault_policy = "ignore"` → log and continue dispatching (for non-critical plugins)
+- [ ] Fault counter: after N faults in M seconds, force-disable regardless of policy
+- [ ] User notification on fault: `[plugin:git-checkpoint] crashed: fuel exhausted in on_event(MessageEnd). Disabled.`
+
+#### Inter-Plugin Isolation
+- [ ] Plugins communicate only via pipes (serialized byte messages) — no shared memory
+- [ ] Pipe messages are delivered asynchronously (sender does not block on receiver)
+- [ ] A faulted plugin's pipe listeners are removed (senders get a `PipeError::RecipientUnavailable`)
+- [ ] Plugin A cannot unload/reload Plugin B (only the host/user can manage lifecycle)
+- [ ] Tool name conflicts: if two plugins register same tool name, second registration fails with error logged
+- [ ] Event ordering: plugins receive events independently, cannot observe or interfere with another plugin's handler
+
+#### Host Protection
+- [ ] Host functions validate all arguments from plugin before acting (untrusted input)
+- [ ] Path traversal checks on `pi_read_file`/`pi_write_file` (canonical path must be under allowed roots)
+- [ ] `pi_run_command` argument sanitization: no shell injection (args are passed as array, never interpolated)
+- [ ] `pi_http_request` URL validation: optional allowlist/blocklist in manifest
+- [ ] Host function call rate limiting (optional): prevent a plugin from spamming `pi_ui_notify` or `pi_http_request`
+- [ ] All host function calls from a faulted plugin are rejected with error
+
+#### Reporting & Observability
+- [ ] Plugin log output: plugins can call `pi_log(level, message)` → written to `~/.local/share/pi/logs/plugins/<name>.log`
+- [ ] Host-side event log: all plugin faults, permission denials, and lifecycle events logged
+- [ ] `/plugin status` command: show per-plugin state (loaded, faulted, disabled), fault count, memory usage, last error
+- [ ] `pi --plugin-debug` flag: verbose plugin dispatch logging to stderr
+- [ ] Structured error context: on fault, capture {plugin_name, event_type, fuel_remaining, memory_used, timestamp}
+
+#### Resource Cleanup on Fault
+- [ ] On fault: cancel any in-flight timers owned by the plugin
+- [ ] On fault: remove any widgets/status text owned by the plugin (prevent stale UI)
+- [ ] On fault with `restart` policy: tools remain registered but return error until plugin restarts
+- [ ] On fault with `disable` policy: full ownership cleanup (same as unload)
+
+**Acceptance**:
+- A plugin with `loop {}` is terminated after fuel budget, host continues normally, user is notified.
+- A plugin that panics during `on_event(ToolCall)` does not prevent other plugins from receiving subsequent events.
+- A plugin allocating memory in a loop is killed at 64MB, host memory is unaffected.
+- Two plugins running simultaneously cannot observe or corrupt each other's state.
+- `/plugin status` shows fault history and current state for all plugins.
 
 ### 4.12 Plugin SDK: Core (`pi-plugin-sdk/src/lib.rs`)
 **Deps**: 4.1 | **Effort**: 3 days
@@ -865,7 +933,7 @@ Phase 1.1 (types) ────────────────────�
     └──► 4.1 (protobuf) ──► 4.3 (wasmtime) ──► 4.4-4.11 (host fns)     │
                                                       │                   │
                                                       ▼                   │
-                                                4.12-4.16 (SDK + plugins + runtime load/unload) │
+                                                4.12-4.17 (SDK + plugins + load/unload + isolation) │
                                                                           │
                                                 5.1-5.11 (providers, parity)
                                                           │
