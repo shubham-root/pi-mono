@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve script location, following symlinks if necessary
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_SOURCE" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ $SCRIPT_SOURCE != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+REPO_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+BRANCH="our.pi.v2"
+
+cd "$REPO_DIR"
+
+# -------------------------------------------------------------------
+# 1. Merge upstream/main into our branch
+# -------------------------------------------------------------------
+echo "==> Fetching upstream..."
+git fetch upstream
+
+current=$(git branch --show-current)
+if [ "$current" != "$BRANCH" ]; then
+    echo "ERROR: expected branch '$BRANCH', currently on '$current'" >&2
+    exit 1
+fi
+
+echo "==> Rebasing $BRANCH onto upstream/main..."
+if ! git rebase upstream/main; then
+    echo "" >&2
+    echo "ERROR: Rebase conflicts detected." >&2
+    echo "Resolve them manually, then run:" >&2
+    echo "  git rebase --continue" >&2
+    echo "  ./pi-update  # re-run to finish build + install" >&2
+    echo "" >&2
+    echo "Or abort with:  git rebase --abort" >&2
+    exit 1
+fi
+
+echo "==> Rebase complete."
+
+# -------------------------------------------------------------------
+# Sync package versions from upstream/main so the installed binary
+# reports the correct version (our branch commits can pin an older
+# version number, causing spurious "Update Available" notifications).
+# -------------------------------------------------------------------
+UPSTREAM_VERSION=$(git show upstream/main:packages/coding-agent/package.json 2>/dev/null \
+    | grep '"version"' | head -1 | sed 's/.*"version": "\(.*\)".*/\1/')
+
+if [ -n "$UPSTREAM_VERSION" ]; then
+    echo "==> Syncing package versions to upstream v${UPSTREAM_VERSION}..."
+    for pkg_json in packages/*/package.json; do
+        if grep -q '"version"' "$pkg_json"; then
+            sed -i.bak "s/\"version\": \".*\"/\"version\": \"${UPSTREAM_VERSION}\"/" "$pkg_json" \
+                && rm -f "${pkg_json}.bak"
+        fi
+    done
+    
+    # Also update internal dependency versions to match
+    for pkg_json in packages/*/package.json; do
+        sed -i.bak "s/\"@mariozechner\/pi-agent-core\": \"\^[0-9.]*\"/\"@mariozechner\/pi-agent-core\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && sed -i.bak "s/\"@mariozechner\/pi-ai\": \"\^[0-9.]*\"/\"@mariozechner\/pi-ai\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && sed -i.bak "s/\"@mariozechner\/pi-tui\": \"\^[0-9.]*\"/\"@mariozechner\/pi-tui\": \"^${UPSTREAM_VERSION}\"/" "$pkg_json" \
+            && rm -f "${pkg_json}.bak"
+    done
+else
+    echo "WARNING: Could not determine upstream version; skipping version sync." >&2
+fi
+
+echo "==> Pushing rebased branch to origin (force-with-lease)..."
+git push --force-with-lease origin "$BRANCH"
+
+# -------------------------------------------------------------------
+# 2. Build all packages
+# -------------------------------------------------------------------
+echo "==> Removing stale nested @mariozechner packages (workspace will re-link them)..."
+# Remove nested node_modules/@mariozechner directories that shadow workspace symlinks
+find "$REPO_DIR/packages" -type d -path "*/node_modules/@mariozechner" | while read dir; do
+    if [ ! -L "$dir" ]; then
+        echo "  Removing $dir"
+        rm -rf "$dir"
+    fi
+done
+
+echo "==> Cleaning package-lock.json and node_modules..."
+rm -rf "$REPO_DIR/node_modules" "$REPO_DIR/package-lock.json"
+
+echo "==> Installing dependencies..."
+npm install
+
+echo "==> Building all packages..."
+npm run build
+
+# -------------------------------------------------------------------
+# 3. Install coding-agent as global 'pi' binary
+# -------------------------------------------------------------------
+echo "==> Installing pi globally..."
+npm install -g "$REPO_DIR/packages/coding-agent"
+
+echo ""
+echo "Done. 'pi' is now available globally:"
+which pi
+pi --version 2>/dev/null || true
