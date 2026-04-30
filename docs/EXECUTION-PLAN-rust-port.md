@@ -488,7 +488,7 @@ The foundation. Everything else depends on being able to talk to an LLM.
 
 ---
 
-## Phase 4: Plugin System (Weeks 15-20)
+## Phase 4: Plugin System (Weeks 15-21)
 
 ### 4.1 Protobuf Schema (`proto/pi_plugin.proto`)
 **Deps**: 1.1 | **Effort**: 2 days
@@ -633,6 +633,30 @@ The foundation. Everything else depends on being able to talk to an LLM.
 - [ ] `pi plugin install <url>` → download .wasm to plugins dir
 - [ ] `pi plugin list` → show loaded plugins with permissions
 - [ ] `pi plugin remove <name>`
+
+### 4.16 Runtime Load/Unload & Ownership Tracking
+**Deps**: 4.4, 4.11 | **Effort**: 3 days
+
+Enable Neovim-style runtime plugin management: load, unload, and reload plugins mid-session without restart.
+
+- [ ] `PluginInstance` ownership registry: track all host-side effects per plugin (tools, subscriptions, widgets, status keys, timers, keybindings, slash commands, pipe listeners)
+- [ ] Every host function that creates a side effect appends to the calling plugin's ownership list
+- [ ] `unload()` method: remove all owned side effects from host state, drop WASM instance, free memory
+- [ ] `reload()` method: unload + fresh instantiation from .wasm file (preserves no state by default)
+- [ ] Optional state serialization: plugin can export `save_state() -> Vec<u8>` and accept it in `load()` for state-preserving reload
+- [ ] `/plugin load <path_or_name>` slash command: instantiate mid-session
+- [ ] `/plugin unload <name>` slash command: clean unload with side effect removal
+- [ ] `/plugin reload <name>` slash command: unload + load
+- [ ] `/plugin list` enhanced: show per-plugin registrations (tools, events, permissions)
+- [ ] Lazy loading support: register stubs for commands/tools/events declared in manifest, instantiate .wasm on first trigger
+- [ ] Lazy trigger replay: after on-demand load, deliver the triggering event/command that caused the load
+- [ ] Guard against unload of plugins with in-flight tool executions (wait or force with warning)
+- [ ] Unit tests: load → register tools → unload → verify tools removed from agent
+- [ ] Unit tests: two plugins subscribe to same event → unload one → other still receives events
+- [ ] Unit tests: lazy load on slash command trigger → plugin activates and handles command
+- [ ] Unit tests: reload preserves state via save_state/load cycle
+
+**Acceptance**: `pi /plugin load ./my.wasm` mid-session adds tools; `/plugin unload my` removes them cleanly with no leaks or stale references.
 
 ---
 
@@ -841,7 +865,7 @@ Phase 1.1 (types) ────────────────────�
     └──► 4.1 (protobuf) ──► 4.3 (wasmtime) ──► 4.4-4.11 (host fns)     │
                                                       │                   │
                                                       ▼                   │
-                                                4.12-4.15 (SDK + plugins) │
+                                                4.12-4.16 (SDK + plugins + runtime load/unload) │
                                                                           │
                                                 5.1-5.11 (providers, parity)
                                                           │
