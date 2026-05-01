@@ -43,6 +43,7 @@ pub enum KeyCommand {
 
     // Ctrl combinations
     CtrlA,
+    CtrlB,
     CtrlC,
     CtrlD,
     CtrlE,
@@ -51,6 +52,7 @@ pub enum KeyCommand {
     CtrlN,
     CtrlO,
     CtrlP,
+    CtrlQ,
     CtrlS,
     CtrlU,
     CtrlV,
@@ -142,6 +144,7 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
 
         // Ctrl combinations
         (KeyCode::Char('a'), KeyModifiers::CONTROL) => KeyCommand::CtrlA,
+        (KeyCode::Char('b'), KeyModifiers::CONTROL) => KeyCommand::CtrlB,
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::CtrlC,
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyCommand::CtrlD,
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => KeyCommand::CtrlE,
@@ -150,6 +153,7 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
         (KeyCode::Char('n'), KeyModifiers::CONTROL) => KeyCommand::CtrlN,
         (KeyCode::Char('o'), KeyModifiers::CONTROL) => KeyCommand::CtrlO,
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyCommand::CtrlP,
+        (KeyCode::Char('q'), KeyModifiers::CONTROL) => KeyCommand::CtrlQ,
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => KeyCommand::CtrlS,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => KeyCommand::CtrlU,
         (KeyCode::Char('v'), KeyModifiers::CONTROL) => KeyCommand::CtrlV,

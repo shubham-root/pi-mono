@@ -8,6 +8,7 @@ pub mod input;
 pub mod components;
 pub mod tui;
 pub mod autocomplete;
+pub mod syntax_highlight;
 
 pub use terminal::Terminal;
 pub use input::{InputParser, KeyCommand};
