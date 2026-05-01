@@ -1,21 +1,19 @@
-//! Interactive mode - TUI matching TypeScript variant exactly
-//! Implements Phase 3 with proper UX:
+//! Interactive mode - TUI matching TypeScript variant
 //! - Enter to send message
 //! - Alt+Enter to queue follow-up
 //! - Escape to cancel
-//! - Escape twice for tree
 //! - Ctrl+L for model selector
 //! - Ctrl+T for thinking toggle
 //! - Ctrl+O for tool output toggle
 //! - Ctrl+C to clear, Ctrl+C twice to quit
+//! - / to open command palette
 
 use anyhow::Result;
 use pi_core::Agent;
 use pi_tui::{input::KeyCommand, EventLoop};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap, List, ListItem, Gauge};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use std::time::Duration;
-use chrono::Local;
 
 /// Slash command info
 #[derive(Clone, Debug)]
@@ -24,21 +22,20 @@ pub struct SlashCommand {
     pub description: String,
 }
 
-/// Get all available slash commands
 fn get_all_slash_commands() -> Vec<SlashCommand> {
     vec![
         SlashCommand { name: "help".to_string(), description: "Show keyboard shortcuts".to_string() },
         SlashCommand { name: "hotkeys".to_string(), description: "Show all keyboard shortcuts".to_string() },
-        SlashCommand { name: "model".to_string(), description: "Switch models (Ctrl+L also works)".to_string() },
-        SlashCommand { name: "settings".to_string(), description: "Edit settings (theme, thinking level)".to_string() },
+        SlashCommand { name: "model".to_string(), description: "Switch models".to_string() },
+        SlashCommand { name: "settings".to_string(), description: "Edit settings".to_string() },
         SlashCommand { name: "login".to_string(), description: "OAuth authentication".to_string() },
         SlashCommand { name: "logout".to_string(), description: "Clear authentication".to_string() },
         SlashCommand { name: "new".to_string(), description: "Start fresh session".to_string() },
-        SlashCommand { name: "tree".to_string(), description: "Show session tree (Escape 2x also works)".to_string() },
-        SlashCommand { name: "session".to_string(), description: "Show session info (tokens, cost, path)".to_string() },
-        SlashCommand { name: "fork".to_string(), description: "Fork session from current point".to_string() },
-        SlashCommand { name: "export".to_string(), description: "Export session to HTML file".to_string() },
-        SlashCommand { name: "share".to_string(), description: "Share session as GitHub gist".to_string() },
+        SlashCommand { name: "tree".to_string(), description: "Show session tree".to_string() },
+        SlashCommand { name: "session".to_string(), description: "Show session info".to_string() },
+        SlashCommand { name: "fork".to_string(), description: "Fork session".to_string() },
+        SlashCommand { name: "export".to_string(), description: "Export to HTML file".to_string() },
+        SlashCommand { name: "share".to_string(), description: "Share as GitHub gist".to_string() },
         SlashCommand { name: "compact".to_string(), description: "Manual context compaction".to_string() },
         SlashCommand { name: "copy".to_string(), description: "Copy last assistant message".to_string() },
         SlashCommand { name: "reload".to_string(), description: "Reload config and extensions".to_string() },
@@ -46,40 +43,17 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
     ]
 }
 
-/// Filter commands by query
-fn filter_commands(query: &str, all_commands: &[SlashCommand]) -> Vec<SlashCommand> {
-    let query_lower = query.to_lowercase();
-    all_commands
-        .iter()
-        .filter(|cmd| cmd.name.contains(&query_lower))
-        .cloned()
-        .collect()
+fn filter_commands(query: &str, all: &[SlashCommand]) -> Vec<SlashCommand> {
+    let q = query.to_lowercase();
+    all.iter().filter(|cmd| cmd.name.contains(&q)).cloned().collect()
 }
 
-
-/// UI display mode
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum DisplayMode {
-    Chat,
-    ModelList,
-    SettingsList,
-}
-
-/// Model info for display
+/// Model info
 #[derive(Clone, Debug)]
-struct ModelInfo {
-    id: String,
-    name: String,
-    provider: String,
-}
-
-/// Setting info for display
-#[derive(Clone, Debug)]
-struct SettingInfo {
-    name: String,
-    description: String,
-    current: String,
-    options: String,
+pub struct ModelInfo {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
 }
 
 fn get_models_list() -> Vec<ModelInfo> {
@@ -97,6 +71,15 @@ fn get_models_list() -> Vec<ModelInfo> {
     ]
 }
 
+/// Setting info
+#[derive(Clone, Debug)]
+pub struct SettingInfo {
+    pub name: String,
+    pub description: String,
+    pub current: String,
+    pub options: String,
+}
+
 fn get_settings_list() -> Vec<SettingInfo> {
     vec![
         SettingInfo { name: "defaultThinkingLevel".to_string(), description: "Thinking level".to_string(), current: "medium".to_string(), options: "off|minimal|low|medium|high|xhigh".to_string() },
@@ -109,25 +92,19 @@ fn get_settings_list() -> Vec<SettingInfo> {
     ]
 }
 
-
-/// Message display with metadata
-#[derive(Clone, Debug)]
-pub struct ConversationMessage {
-    pub role: String, // "user" or "assistant"
-    pub content: String,
-    pub thinking: Option<String>,
-    pub tool_output: Option<String>,
+/// UI display mode
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DisplayMode {
+    Chat,
+    ModelList,
+    SettingsList,
 }
 
-/// Context usage tracking
-#[derive(Clone, Debug, Default)]
-pub struct ContextStatus {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read: u32,
-    pub cache_write: u32,
-    pub total_tokens: u32,
-    pub estimated_cost: f32,
+/// Conversation message
+#[derive(Clone, Debug)]
+pub struct ConversationMessage {
+    pub role: String,
+    pub content: String,
 }
 
 pub struct InteractiveMode {
@@ -136,377 +113,247 @@ pub struct InteractiveMode {
     messages: Vec<ConversationMessage>,
     input_text: String,
     queued_messages: Vec<String>,
-    
-    // UI state
     status: String,
-    running: bool,
     executing: bool,
-    
-    // Display toggles
     show_thinking: bool,
     show_tools: bool,
-    
-    // Context tracking
-    context: ContextStatus,
-    
-    // Tree navigation
-    branch_points: Vec<BranchPoint>,
-    selected_branch: Option<usize>,
-    
-    // Keybinding state
-    last_escape_time: Option<std::time::Instant>,
-    ctrl_c_count: u32,
-    
-    // Model selector state
-    show_model_selector: bool,
-    selected_model_idx: usize,    
+
     // Command palette
-    command_palette_active: bool,
-    command_palette_filtered: Vec<SlashCommand>,
-    command_palette_selected: usize,
-    all_slash_commands: Vec<SlashCommand>,    
-    // Display mode
+    palette_active: bool,
+    palette_items: Vec<SlashCommand>,
+    palette_selected: usize,
+    all_commands: Vec<SlashCommand>,
+
+    // Display mode for model/settings lists
     display_mode: DisplayMode,
     model_list: Vec<ModelInfo>,
     model_selected: usize,
     settings_list: Vec<SettingInfo>,
     settings_selected: usize,
-}
 
-#[derive(Clone, Debug)]
-struct BranchPoint {
-    message_index: usize,
-    timestamp: String,
-    label: Option<String>,
+    // Escape/Ctrl+C tracking
+    last_escape_time: Option<std::time::Instant>,
+    ctrl_c_count: u32,
 }
 
 impl InteractiveMode {
     pub fn new(agent: Agent) -> Result<Self> {
         let event_loop = EventLoop::new()?;
-
         Ok(Self {
             event_loop,
             agent: Some(agent),
             messages: Vec::new(),
             input_text: String::new(),
             queued_messages: Vec::new(),
-            
-            status: "Ready to chat. Type / for commands. Ctrl+L for model selector.".to_string(),
-            running: true,
+            status: "Ready. Type / for commands, Enter to send, Ctrl+C twice to quit.".to_string(),
             executing: false,
-            
             show_thinking: false,
             show_tools: false,
-            
-            context: ContextStatus::default(),
-            
-            branch_points: Vec::new(),
-            selected_branch: None,
-            
+            palette_active: false,
+            palette_items: Vec::new(),
+            palette_selected: 0,
+            all_commands: get_all_slash_commands(),
+            display_mode: DisplayMode::Chat,
+            model_list: Vec::new(),
+            model_selected: 0,
+            settings_list: Vec::new(),
+            settings_selected: 0,
             last_escape_time: None,
             ctrl_c_count: 0,
-            
-            show_model_selector: false,
-            selected_model_idx: 0,            
-            command_palette_active: false,
-            command_palette_filtered: vec![],
-            command_palette_selected: 0,
-            all_slash_commands: get_all_slash_commands(),            
-            display_mode: DisplayMode::Chat,
-            model_list: vec![],
-            model_selected: 0,
-            settings_list: vec![],
-            settings_selected: 0,
         })
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.run_loop().await
-    }
-
-    async fn run_loop(&mut self) -> Result<()> {
-        let mut last_tick = std::time::Instant::now();
-        
         loop {
-            // Poll for events with 50ms timeout
             if let Some(event) = self.event_loop.poll_event(Duration::from_millis(50)) {
                 use pi_tui::tui::AppEvent;
-                
-                let should_continue = match event {
-                    AppEvent::Key(cmd) => self.handle_key_command(cmd).await?,
-                    AppEvent::Resize(w, h) => {
-                        self.status = format!("Terminal: {}x{}", w, h);
-                        true
-                    }
-                    AppEvent::Tick => true,
+                let cont = match event {
+                    AppEvent::Key(cmd) => self.handle_key(cmd).await?,
                     _ => true,
                 };
-
-                if !should_continue {
-                    self.running = false;
+                if !cont {
                     break;
                 }
             }
-
-            // Redraw UI every 50ms
-            self.draw_ui()?;
-
-            // Check for escape timeout (2 seconds)
-            let now = std::time::Instant::now();
-            if now.duration_since(last_tick) > Duration::from_secs(2) {
-                self.ctrl_c_count = 0;
-                last_tick = now;
-            }
-
-            if !self.running {
-                break;
-            }
+            self.draw()?;
         }
-
         Ok(())
     }
 
-    async fn handle_key_command(&mut self, cmd: KeyCommand) -> Result<bool> {
+    async fn handle_key(&mut self, cmd: KeyCommand) -> Result<bool> {
         match cmd {
-            // **SEND MESSAGE or SELECT COMMAND** - Enter key
+            // ENTER: select from palette, select model/setting, or send message
             KeyCommand::Enter => {
-                if self.display_mode == DisplayMode::ModelList {
-                    if !self.model_list.is_empty() && self.model_selected < self.model_list.len() {
-                        let selected = &self.model_list[self.model_selected];
-                        self.status = format!("Selected model: {} ({})", selected.name, selected.provider);
+                if self.palette_active {
+                    // Select command from palette
+                    if !self.palette_items.is_empty() {
+                        let cmd_name = self.palette_items[self.palette_selected].name.clone();
+                        self.close_palette();
+                        self.execute_command(&cmd_name).await?;
+                        self.input_text.clear();
+                    }
+                } else if self.display_mode == DisplayMode::ModelList {
+                    // Select model
+                    if !self.model_list.is_empty() {
+                        let m = &self.model_list[self.model_selected];
+                        self.status = format!("Selected: {} ({})", m.name, m.provider);
                         self.display_mode = DisplayMode::Chat;
                     }
                 } else if self.display_mode == DisplayMode::SettingsList {
-                    if !self.settings_list.is_empty() && self.settings_selected < self.settings_list.len() {
-                        let selected = &self.settings_list[self.settings_selected];
-                        self.status = format!("Edit {}: {} (current: {})", selected.name, selected.description, selected.current);
+                    // Select setting
+                    if !self.settings_list.is_empty() {
+                        let s = &self.settings_list[self.settings_selected];
+                        self.status = format!("Setting: {} = {}", s.name, s.current);
                         self.display_mode = DisplayMode::Chat;
                     }
-                } else if self.command_palette_active {
-                    // Select from command palette
-                    if !self.command_palette_filtered.is_empty() {
-                        let cmd = self.command_palette_filtered[self.command_palette_selected].name.clone();
-                        self.input_text = format!("/{}", cmd);
-                        self.command_palette_active = false;
-                        self.command_palette_filtered.clear();
-                        self.command_palette_selected = 0;
-                    }
-                } else if self.show_model_selector {
-                    // In model selector, Enter to select model
-                    self.show_model_selector = false;
-                    self.status = "Model selected".to_string();
                 } else if !self.input_text.is_empty() {
+                    // Send message
                     let msg = self.input_text.trim().to_string();
-                    
                     if msg.starts_with('/') {
-                        self.handle_slash_command(&msg).await?;
+                        let cmd_name = msg.trim_start_matches('/').to_string();
+                        self.execute_command(&cmd_name).await?;
                     } else {
-                        self.send_user_message(&msg).await?;
+                        self.send_message(&msg).await?;
                     }
-                    
                     self.input_text.clear();
                 }
                 Ok(true)
             }
 
-            // **QUEUE FOLLOW-UP** - Alt+Enter (queue after agent finishes)
+            // Alt+Enter: queue message
             KeyCommand::AltEnter => {
                 if !self.input_text.is_empty() {
                     self.queued_messages.push(self.input_text.trim().to_string());
-                    self.status = format!("Queued message ({})", self.queued_messages.len());
+                    self.status = format!("Queued ({})", self.queued_messages.len());
                     self.input_text.clear();
                 }
                 Ok(true)
             }
 
-            // **NEWLINE IN INPUT** - Shift+Enter or just for multiline (we'll treat Enter only)
-            KeyCommand::ShiftEnter => {
-                self.input_text.push('\n');
-                Ok(true)
-            }
-
-            // **CLEAR EDITOR / QUIT** - Ctrl+C (clear once, quit on second press)
+            // Ctrl+C: clear or quit
             KeyCommand::CtrlC => {
                 self.ctrl_c_count += 1;
-                
-                if self.ctrl_c_count == 1 {
-                    if !self.input_text.is_empty() {
-                        self.input_text.clear();
-                        self.status = "Input cleared (Ctrl+C again to quit)".to_string();
-                    } else {
-                        self.status = "Press Ctrl+C again to quit".to_string();
-                    }
-                    
-                    // Reset counter after 2 seconds
-                    std::thread::sleep(Duration::from_millis(50));
-                } else if self.ctrl_c_count >= 2 {
-                    return Ok(false); // Exit
+                if self.ctrl_c_count >= 2 {
+                    return Ok(false);
                 }
-                
+                if !self.input_text.is_empty() {
+                    self.input_text.clear();
+                    self.close_palette();
+                }
+                self.status = "Press Ctrl+C again to quit".to_string();
                 Ok(true)
             }
 
-            // **CANCEL EXECUTION** - Escape (single), Tree Navigation (double)
+            // Escape: cancel or go back
             KeyCommand::Escape => {
-                // If in list mode, go back to chat
-                if self.display_mode == DisplayMode::ModelList || self.display_mode == DisplayMode::SettingsList {
+                self.ctrl_c_count = 0;
+                if self.palette_active {
+                    self.close_palette();
+                    self.input_text.clear();
+                    self.status = "Palette closed".to_string();
+                } else if self.display_mode != DisplayMode::Chat {
                     self.display_mode = DisplayMode::Chat;
                     self.status = "Back to chat".to_string();
-                    return Ok(true);
+                } else if !self.input_text.is_empty() {
+                    self.input_text.clear();
+                    self.status = "Input cleared".to_string();
                 }
-                
-                let now = std::time::Instant::now();
-                let time_since_last = if let Some(last) = self.last_escape_time { now.duration_since(last) } else { Duration::from_secs(10) };
-                
-                if time_since_last < Duration::from_millis(500) {
-                    // Double escape - open tree selector
-                    self.status = "Tree selector - not yet wired".to_string();
-                } else {
-                    // Single escape - cancel/abort
-                    if self.executing {
-                        self.executing = false;
-                        self.status = "Execution cancelled".to_string();
-                    } else if !self.input_text.is_empty() {
-                        self.input_text.clear();
-                        self.status = "Input cleared".to_string();
-                    } else if !self.queued_messages.is_empty() {
-                        // Restore queued messages to editor
-                        self.input_text = self.queued_messages.pop().unwrap_or_default();
-                        self.status = format!("Restored queued message. {} remaining", self.queued_messages.len());
-                    }
-                }
-                
-                self.last_escape_time = Some(std::time::Instant::now());
                 Ok(true)
             }
 
-            // **MODEL SELECTOR** - Ctrl+L
-            KeyCommand::CtrlL => {
-                self.show_model_selector = !self.show_model_selector;
-                self.status = if self.show_model_selector {
-                    "Model selector - use ↑↓ to navigate, Enter to select".to_string()
-                } else {
-                    "Model selector closed".to_string()
-                };
-                Ok(true)
-            }
-
-            // **CYCLE MODELS FORWARD** - Ctrl+P
-            KeyCommand::CtrlP => {
-                self.selected_model_idx += 1;
-                self.status = format!("Model index: {}", self.selected_model_idx);
-                Ok(true)
-            }
-
-            // **CYCLE MODELS BACKWARD** - Shift+Ctrl+P
-            KeyCommand::ShiftCtrlP => {
-                self.selected_model_idx = self.selected_model_idx.saturating_sub(1);
-                self.status = format!("Model index: {}", self.selected_model_idx);
-                Ok(true)
-            }
-
-            // **TOGGLE THINKING** - Ctrl+T
-            KeyCommand::CtrlT => {
-                self.show_thinking = !self.show_thinking;
-                self.status = if self.show_thinking {
-                    "Thinking blocks: ON".to_string()
-                } else {
-                    "Thinking blocks: OFF".to_string()
-                };
-                Ok(true)
-            }
-
-            // **TOGGLE TOOL OUTPUT** - Ctrl+O
-            KeyCommand::CtrlO => {
-                self.show_tools = !self.show_tools;
-                self.status = if self.show_tools {
-                    "Tool output: ON".to_string()
-                } else {
-                    "Tool output: OFF".to_string()
-                };
-                Ok(true)
-            }
-
-            // **THINKING LEVEL** - Shift+Tab
-            KeyCommand::ShiftTab => {
-                self.status = "Thinking level cycled (not yet implemented)".to_string();
-                Ok(true)
-            }
-
-            // **REGULAR TEXT INPUT** or COMMAND PALETTE
+            // Character input
             KeyCommand::Char(c) => {
                 self.ctrl_c_count = 0;
                 self.input_text.push(c);
-                
-                // Activate command palette when '/' is typed
+
+                // Activate palette on first /
                 if self.input_text == "/" {
-                    self.command_palette_active = true;
-                    self.command_palette_filtered = self.all_slash_commands.clone();
-                    self.command_palette_selected = 0;
-                    self.status = "Type command name to filter, ↑↓ to navigate, Enter to select".to_string();
-                } else if self.input_text.starts_with('/') && self.command_palette_active {
-                    // Filter commands as user types
-                    let query = self.input_text[1..].trim(); // Remove '/' prefix
-                    self.command_palette_filtered = filter_commands(query, &self.all_slash_commands);
-                    self.command_palette_selected = 0;
+                    self.palette_active = true;
+                    self.palette_items = self.all_commands.clone();
+                    self.palette_selected = 0;
+                    self.status = "Type to filter commands, ↑↓ to navigate, Enter to select".to_string();
+                } else if self.palette_active && self.input_text.starts_with('/') {
+                    // Filter as user types
+                    let query = &self.input_text[1..];
+                    self.palette_items = filter_commands(query, &self.all_commands);
+                    self.palette_selected = 0;
                 }
-                
                 Ok(true)
             }
 
-            // **BACKSPACE**
+            // Backspace
             KeyCommand::Backspace => {
                 self.ctrl_c_count = 0;
                 self.input_text.pop();
-                
-                // Keep palette active while typing command
-                if self.input_text.starts_with('/') && self.input_text.len() > 1 {
-                    let query = self.input_text[1..].trim();
-                    self.command_palette_filtered = filter_commands(query, &self.all_slash_commands);
-                    self.command_palette_selected = 0;
-                } else if self.input_text == "/" {
-                    self.command_palette_active = true;
-                    self.command_palette_filtered = self.all_slash_commands.clone();
-                    self.command_palette_selected = 0;
-                } else {
-                    self.command_palette_active = false;
-                    self.command_palette_filtered.clear();
+                if self.palette_active {
+                    if self.input_text.is_empty() {
+                        self.close_palette();
+                    } else if self.input_text.starts_with('/') {
+                        let query = &self.input_text[1..];
+                        self.palette_items = filter_commands(query, &self.all_commands);
+                        self.palette_selected = 0;
+                    } else {
+                        self.close_palette();
+                    }
                 }
-                
                 Ok(true)
             }
 
-            // **NAVIGATION IN MODEL SELECTOR or COMMAND PALETTE**
+            // Arrow Up: navigate palette/lists
             KeyCommand::ArrowUp => {
-                if self.display_mode == DisplayMode::ModelList && !self.model_list.is_empty() {
+                if self.palette_active && !self.palette_items.is_empty() {
+                    self.palette_selected = self.palette_selected.saturating_sub(1);
+                } else if self.display_mode == DisplayMode::ModelList {
                     self.model_selected = self.model_selected.saturating_sub(1);
-                } else if self.display_mode == DisplayMode::SettingsList && !self.settings_list.is_empty() {
+                } else if self.display_mode == DisplayMode::SettingsList {
                     self.settings_selected = self.settings_selected.saturating_sub(1);
-                } else if self.command_palette_active && !self.command_palette_filtered.is_empty() {
-                    self.command_palette_selected = self.command_palette_selected.saturating_sub(1);
-                }
-                Ok(true)
-            }
-            KeyCommand::ArrowDown => {
-                if self.display_mode == DisplayMode::ModelList && !self.model_list.is_empty() {
-                    self.model_selected = (self.model_selected + 1).min(self.model_list.len() - 1);
-                } else if self.display_mode == DisplayMode::SettingsList && !self.settings_list.is_empty() {
-                    self.settings_selected = (self.settings_selected + 1).min(self.settings_list.len() - 1);
-                } else if self.command_palette_active && !self.command_palette_filtered.is_empty() {
-                    self.command_palette_selected = (self.command_palette_selected + 1).min(self.command_palette_filtered.len() - 1);
                 }
                 Ok(true)
             }
 
-            // **TAB - AUTOCOMPLETE**
-            KeyCommand::Tab => {
-                if self.command_palette_active && !self.command_palette_filtered.is_empty() {
-                    // Auto-complete selected command
-                    let cmd = self.command_palette_filtered[self.command_palette_selected].name.clone();
-                    self.input_text = format!("/{}", cmd);
-                    self.command_palette_active = false;
-                    self.command_palette_filtered.clear();
+            // Arrow Down: navigate palette/lists
+            KeyCommand::ArrowDown => {
+                if self.palette_active && !self.palette_items.is_empty() {
+                    if self.palette_selected < self.palette_items.len() - 1 {
+                        self.palette_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::ModelList && !self.model_list.is_empty() {
+                    if self.model_selected < self.model_list.len() - 1 {
+                        self.model_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::SettingsList && !self.settings_list.is_empty() {
+                    if self.settings_selected < self.settings_list.len() - 1 {
+                        self.settings_selected += 1;
+                    }
                 }
+                Ok(true)
+            }
+
+            // Tab: autocomplete command
+            KeyCommand::Tab => {
+                if self.palette_active && !self.palette_items.is_empty() {
+                    let cmd_name = self.palette_items[self.palette_selected].name.clone();
+                    self.input_text = format!("/{}", cmd_name);
+                    self.close_palette();
+                }
+                Ok(true)
+            }
+
+            // Display toggles
+            KeyCommand::CtrlT => {
+                self.show_thinking = !self.show_thinking;
+                self.status = format!("Thinking: {}", if self.show_thinking { "ON" } else { "OFF" });
+                Ok(true)
+            }
+            KeyCommand::CtrlO => {
+                self.show_tools = !self.show_tools;
+                self.status = format!("Tool output: {}", if self.show_tools { "ON" } else { "OFF" });
+                Ok(true)
+            }
+
+            // Model selector shortcut
+            KeyCommand::CtrlL => {
+                self.execute_command("model").await?;
                 Ok(true)
             }
 
@@ -514,16 +361,59 @@ impl InteractiveMode {
         }
     }
 
-    async fn send_user_message(&mut self, text: &str) -> Result<()> {
-        // Add user message
+    fn close_palette(&mut self) {
+        self.palette_active = false;
+        self.palette_items.clear();
+        self.palette_selected = 0;
+    }
+
+    async fn execute_command(&mut self, name: &str) -> Result<()> {
+        match name {
+            "help" | "hotkeys" => {
+                self.status = "Enter: send | Alt+Enter: queue | Esc: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+O: tools | Ctrl+C x2: quit".to_string();
+            }
+            "model" => {
+                self.display_mode = DisplayMode::ModelList;
+                self.model_list = get_models_list();
+                self.model_selected = 0;
+                self.status = "Select a model - ↑↓ navigate, Enter to select, Esc to cancel".to_string();
+            }
+            "settings" => {
+                self.display_mode = DisplayMode::SettingsList;
+                self.settings_list = get_settings_list();
+                self.settings_selected = 0;
+                self.status = "Edit settings - ↑↓ navigate, Enter to edit, Esc to cancel".to_string();
+            }
+            "new" => {
+                self.messages.clear();
+                self.queued_messages.clear();
+                self.status = "New session started".to_string();
+            }
+            "tree" => {
+                self.status = format!("Session tree: {} messages", self.messages.len());
+            }
+            "session" => {
+                self.status = format!("Session: {} messages, {} queued", self.messages.len(), self.queued_messages.len());
+            }
+            "quit" => {
+                // Set flag to exit on next iteration
+                self.status = "Exiting...".to_string();
+                // Force exit by triggering CtrlC twice logic
+                self.ctrl_c_count = 2;
+            }
+            _ => {
+                self.status = format!("Unknown command: /{}", name);
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_message(&mut self, text: &str) -> Result<()> {
         self.messages.push(ConversationMessage {
             role: "user".to_string(),
             content: text.to_string(),
-            thinking: None,
-            tool_output: None,
         });
 
-        // Execute agent if available
         if let Some(ref mut agent) = self.agent {
             self.executing = true;
             self.status = "Executing...".to_string();
@@ -533,8 +423,6 @@ impl InteractiveMode {
                     self.messages.push(ConversationMessage {
                         role: "assistant".to_string(),
                         content: response,
-                        thinking: None,
-                        tool_output: None,
                     });
                     self.status = "Ready".to_string();
                 }
@@ -544,83 +432,13 @@ impl InteractiveMode {
             }
             self.executing = false;
         } else {
-            self.status = "No API key configured".to_string();
-        }
-
-        Ok(())
-    }
-
-    async fn handle_slash_command(&mut self, cmd: &str) -> Result<()> {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        match parts.get(0).map(|s| *s) {
-            Some("/help") | Some("/hotkeys") => {
-                self.status = "Enter: send | Alt+Enter: queue | Escape: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+O: tools | Ctrl+C: quit".to_string();
-            }
-            Some("/model") => {
-                self.display_mode = DisplayMode::ModelList;
-                self.model_list = get_models_list();
-                self.model_selected = 0;
-                self.status = "Select model - ↑↓ to navigate, Enter to select, Escape to cancel".to_string();
-            }
-            Some("/settings") => {
-                self.display_mode = DisplayMode::SettingsList;
-                self.settings_list = get_settings_list();
-                self.settings_selected = 0;
-                self.status = "Select setting - ↑↓ to navigate, Enter to edit, Escape to cancel".to_string();
-            }
-            Some("/login") => {
-                self.status = "Login dialog - not yet wired".to_string();
-            }
-            Some("/new") => {
-                self.display_mode = DisplayMode::Chat;
-                self.messages.clear();
-                self.queued_messages.clear();
-                self.input_text.clear();
-                self.branch_points.clear();
-                self.context = ContextStatus::default();
-                self.status = "New session started".to_string();
-            }
-            Some("/tree") => {
-                self.status = format!("Session tree - {} messages, {} branches", self.messages.len(), self.branch_points.len());
-            }
-            Some("/session") => {
-                self.status = format!("Session: {} messages, {} tokens, ${:.4}", 
-                    self.messages.len(), 
-                    self.context.total_tokens,
-                    self.context.estimated_cost
-                );
-            }
-            Some("/fork") => {
-                self.status = "Fork session - not yet implemented".to_string();
-            }
-            Some("/export") => {
-                self.status = "Export session - not yet implemented".to_string();
-            }
-            Some("/quit") => {
-                return Ok(());
-            }
-            _ => {
-                self.status = format!("Unknown command: {}", parts.get(0).unwrap_or(&""));
-            }
+            self.status = "No API key configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.".to_string();
         }
         Ok(())
     }
 
-    fn autocomplete_slash_command(&mut self) {
-        let commands = [
-            "/help", "/model", "/settings", "/login", "/new", "/tree", "/session",
-            "/fork", "/export", "/quit", "/hotkeys"
-        ];
-
-        for cmd in &commands {
-            if cmd.starts_with(&self.input_text) {
-                self.input_text = cmd.to_string();
-                break;
-            }
-        }
-    }
-
-    fn draw_ui(&mut self) -> Result<()> {
+    fn draw(&mut self) -> Result<()> {
+        // Snapshot state for closure
         let messages = self.messages.clone();
         let input_text = self.input_text.clone();
         let status = self.status.clone();
@@ -628,147 +446,151 @@ impl InteractiveMode {
         let executing = self.executing;
         let show_thinking = self.show_thinking;
         let show_tools = self.show_tools;
-        let show_model_selector = self.show_model_selector;
+        let palette_active = self.palette_active;
+        let palette_items = self.palette_items.clone();
+        let palette_selected = self.palette_selected;
+        let display_mode = self.display_mode;
+        let model_list = self.model_list.clone();
+        let model_selected = self.model_selected;
+        let settings_list = self.settings_list.clone();
+        let settings_selected = self.settings_selected;
 
         self.event_loop.terminal().draw(|frame| {
             let size = frame.size();
+            let messages_h = (size.height as f32 * 0.70) as u16;
+            let input_h = (size.height as f32 * 0.20) as u16;
+            let footer_h = size.height.saturating_sub(messages_h + input_h);
 
-            // Main layout: 70% messages, 20% input, 10% footer
-            let messages_height = (size.height as f32 * 0.70) as u16;
-            let input_height = (size.height as f32 * 0.20) as u16;
-            let footer_height = size.height - messages_height - input_height;
+            let msg_area = Rect { x: 0, y: 0, width: size.width, height: messages_h };
+            let input_area = Rect { x: 0, y: messages_h, width: size.width, height: input_h };
+            let footer_area = Rect { x: 0, y: messages_h + input_h, width: size.width, height: footer_h };
 
-            // Messages pane
-            let messages_area = Rect {
-                x: 0,
-                y: 0,
-                width: size.width,
-                height: messages_height,
-            };
-
-            // Input pane
-            let input_area = Rect {
-                x: 0,
-                y: messages_height,
-                width: size.width,
-                height: input_height,
-            };
-
-            // Footer
-            let footer_area = Rect {
-                x: 0,
-                y: messages_height + input_height,
-                width: size.width,
-                height: footer_height,
-            };
-
-            
-            // === MODEL LIST ===
-            if self.display_mode == DisplayMode::ModelList && !self.model_list.is_empty() {
-                let msg_items: Vec<ListItem> = self.model_list
+            // === MESSAGES / MODEL LIST / SETTINGS LIST ===
+            if palette_active && !palette_items.is_empty() {
+                // Show command palette in message area
+                let items: Vec<ListItem> = palette_items
                     .iter()
                     .enumerate()
-                    .map(|(idx, model)| {
-                        let style = if idx == self.model_selected {
-                            Style::default().bg(Color::DarkGray).fg(Color::White)
+                    .map(|(i, cmd)| {
+                        let style = if i == palette_selected {
+                            Style::default().bg(Color::Cyan).fg(Color::Black)
                         } else {
                             Style::default()
                         };
-                        let text = format!("{:<15} {:<40} ({})", model.name, model.id, model.provider);
+                        let text = format!("  /{:<15}  {}", cmd.name, cmd.description);
                         ListItem::new(text).style(style)
                     })
                     .collect();
-
-                let msg_list = List::new(msg_items)
-                    .block(Block::default().borders(Borders::ALL).title("Models - Select with ↑↓, Enter to choose"));
-                frame.render_widget(msg_list, messages_area);
-            }
-            // === SETTINGS LIST ===
-            else if self.display_mode == DisplayMode::SettingsList && !self.settings_list.is_empty() {
-                let settings_items: Vec<ListItem> = self.settings_list
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, setting)| {
-                        let style = if idx == self.settings_selected {
-                            Style::default().bg(Color::DarkGray).fg(Color::White)
-                        } else {
-                            Style::default()
-                        };
-                        let text = format!("{:<25} = {:<20} {}", setting.name, setting.current, setting.options);
-                        ListItem::new(text).style(style)
-                    })
-                    .collect();
-
-                let settings_list = List::new(settings_items)
-                    .block(Block::default().borders(Borders::ALL).title("Settings - Select with ↑↓, Enter to edit"));
-                frame.render_widget(settings_list, messages_area);
-            }
-            // === NORMAL CHAT MODE ===
-            else if self.display_mode == DisplayMode::Chat {
-                // === MESSAGES PANE ===
-                let mut message_lines = vec![];
-                for msg in &messages {
-                    let prefix = if msg.role == "user" { "YOU " } else { "AI  " };
-                    let color = if msg.role == "user" { Color::Cyan } else { Color::Green };
-                    
-                    for line in msg.content.lines() {
-                        message_lines.push(line.to_string());
+                let list = List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Commands ({}) - ↑↓ navigate, Enter to select, Esc to cancel", palette_items.len())),
+                );
+                frame.render_widget(list, msg_area);
+            } else if display_mode == DisplayMode::ModelList && !model_list.is_empty() {
+                // Show model list grouped by provider
+                let mut items: Vec<ListItem> = vec![];
+                let mut current_provider = String::new();
+                for (i, m) in model_list.iter().enumerate() {
+                    if m.provider != current_provider {
+                        current_provider = m.provider.clone();
+                        items.push(
+                            ListItem::new(format!("── {} ──", current_provider.to_uppercase()))
+                                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        );
                     }
+                    let style = if i == model_selected {
+                        Style::default().bg(Color::Cyan).fg(Color::Black)
+                    } else {
+                        Style::default()
+                    };
+                    items.push(ListItem::new(format!("  {} ({})", m.name, m.id)).style(style));
                 }
-
-                // Show thinking if toggled
+                let list = List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Models - ↑↓ navigate, Enter to select, Esc to cancel"),
+                );
+                frame.render_widget(list, msg_area);
+            } else if display_mode == DisplayMode::SettingsList && !settings_list.is_empty() {
+                // Show settings list
+                let items: Vec<ListItem> = settings_list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let style = if i == settings_selected {
+                            Style::default().bg(Color::Cyan).fg(Color::Black)
+                        } else {
+                            Style::default()
+                        };
+                        let text = format!(
+                            "  {:<25} = {:<15}  ({})",
+                            s.name, s.current, s.options
+                        );
+                        ListItem::new(text).style(style)
+                    })
+                    .collect();
+                let list = List::new(items).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Settings - ↑↓ navigate, Enter to select, Esc to cancel"),
+                );
+                frame.render_widget(list, msg_area);
+            } else {
+                // Show conversation
+                let mut lines: Vec<ListItem> = vec![];
+                for msg in &messages {
+                    let prefix = if msg.role == "user" { "YOU" } else { "AI " };
+                    let color = if msg.role == "user" { Color::Cyan } else { Color::Green };
+                    for line in msg.content.lines() {
+                        lines.push(
+                            ListItem::new(format!("{} > {}", prefix, line))
+                                .style(Style::default().fg(color)),
+                        );
+                    }
+                    lines.push(ListItem::new(""));
+                }
                 if show_thinking {
-                    message_lines.push("".to_string());
-                    message_lines.push("[THINKING BLOCKS]".to_string());
+                    lines.push(ListItem::new("[Thinking blocks visible]").style(Style::default().fg(Color::Magenta)));
                 }
-
-                // Show tools if toggled
                 if show_tools {
-                    message_lines.push("".to_string());
-                    message_lines.push("[TOOL OUTPUT]".to_string());
+                    lines.push(ListItem::new("[Tool output visible]").style(Style::default().fg(Color::Yellow)));
                 }
+                let list = List::new(lines).block(Block::default().borders(Borders::ALL).title("Conversation"));
+                frame.render_widget(list, msg_area);
+            }
 
-
-                let msg_items: Vec<ListItem> = message_lines
-                .iter()
-                .map(|line| ListItem::new(line.clone()))
-                .collect();
-
-            let msg_list = List::new(msg_items)
-                .block(Block::default().borders(Borders::ALL).title("Conversation"));
-            frame.render_widget(msg_list, messages_area);
-
-            // === INPUT PANE ===
+            // === INPUT ===
             let input_title = if executing {
-                format!("INPUT (executing...)")
+                "INPUT (executing...)".to_string()
             } else if queued_count > 0 {
                 format!("INPUT ({} queued)", queued_count)
-            } else if show_model_selector {
-                "MODEL SELECTOR - ↑↓ navigate, Enter to select".to_string()
+            } else if palette_active {
+                format!("INPUT - {} commands available", palette_items.len())
             } else {
                 "INPUT - Enter to send, Alt+Enter to queue, / for commands".to_string()
             };
-
+            let input_style = if executing { Style::default().fg(Color::Yellow) } else { Style::default() };
             let input_widget = Paragraph::new(input_text.clone())
                 .block(Block::default().borders(Borders::ALL).title(input_title))
-                .style(if executing { Style::default().fg(Color::Yellow) } else { Style::default() })
-                .wrap(Wrap { trim: true });
+                .style(input_style)
+                .wrap(Wrap { trim: false });
             frame.render_widget(input_widget, input_area);
 
-            } // End Chat mode
             // === FOOTER ===
+            let mode_indicator = match display_mode {
+                DisplayMode::Chat => if executing { "⏳" } else { "✓" },
+                DisplayMode::ModelList => "📦",
+                DisplayMode::SettingsList => "⚙",
+            };
             let footer_text = format!(
-                "{} | Messages: {} | Tokens: {}/{} | Cost: ${:.4} | {}",
-                status.clone(),
+                "{}  {}  Messages: {}  Queued: {}",
+                mode_indicator,
+                status,
                 messages.len(),
-                0,  // TODO: actual token count
-                5000,
-                0.0,
-                if executing { "⏳ EXECUTING" } else { "✓ READY" }
+                queued_count,
             );
-
-            let footer_widget = Paragraph::new(footer_text)
-                .style(Style::default().fg(if executing { Color::Yellow } else { Color::Gray }));
+            let footer_widget = Paragraph::new(footer_text).style(Style::default().fg(Color::Gray));
             frame.render_widget(footer_widget, footer_area);
         })?;
 
