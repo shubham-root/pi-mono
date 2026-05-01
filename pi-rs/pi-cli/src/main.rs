@@ -12,10 +12,143 @@ mod server;
 mod plugin;
 
 use args::{Cli, Commands, ServerSubcommand, PluginSubcommand};
+use pi_core::model_registry::ModelRegistry;
 use pi_core::Agent;
 use pi_modes::InteractiveMode;
 use pi_tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
-use std::env;
+
+/// Priority order when auto-picking a default provider from env vars.
+/// AWS credentials come last because `AWS_ACCESS_KEY_ID` / `AWS_PROFILE`
+/// are typically present in dev shells for unrelated reasons; picking
+/// bedrock alphabetically caused auth failures when the user intended a
+/// different provider (see issue with StepFun/OpenRouter being routed to
+/// Bedrock). Mirrors the ordering used by the TypeScript version's
+/// `defaultModelPerProvider`.
+const DEFAULT_PROVIDER_PRIORITY: &[&str] = &[
+    "anthropic",
+    "openai",
+    "openrouter",
+    "vercel-ai-gateway",
+    "google",
+    "google-vertex",
+    "xai",
+    "groq",
+    "cerebras",
+    "deepseek",
+    "mistral",
+    "fireworks",
+    "huggingface",
+    "zai",
+    "github-copilot",
+    "opencode",
+    "opencode-go",
+    "minimax",
+    "minimax-cn",
+    "kimi-coding",
+    "cloudflare-workers-ai",
+    "azure-openai-responses",
+    "openai-codex",
+    "google-gemini-cli",
+    "google-antigravity",
+    "amazon-bedrock",
+];
+
+/// Resolve a `(model_id, api_key)` pair from CLI flags + registry-aware env
+/// lookup. `strict = true` exits the process on missing credentials; otherwise
+/// a warning is printed and the TUI still starts (useful for read-only UI
+/// navigation before auth is configured).
+///
+/// The returned model id is always fully qualified (`provider_id/model_id`)
+/// so downstream `resolve_model` never has to guess which provider owns a
+/// bare id that happens to exist under several providers (e.g.
+/// `anthropic.claude-opus-4-6-v1` exists under both anthropic and bedrock).
+fn resolve_model_and_key(
+    cli_model: Option<String>,
+    strict: bool,
+) -> (String, Option<String>) {
+    let registry = ModelRegistry::global();
+
+    // 1. Explicit --model flag: accept either bare or qualified form. Look
+    //    up the provider for env-var resolution; keep the user-supplied id
+    //    as-is so error messages match what they typed.
+    if let Some(model_id) = cli_model {
+        let found = if let Some((pid, mid)) = model_id.split_once('/') {
+            registry.find_by_provider(pid, mid)
+        } else {
+            registry.find_model(&model_id)
+        };
+
+        let api_key = found.and_then(|(p, _)| p.resolve_env_key().map(|(_, v)| v));
+        if api_key.is_none() && strict {
+            let hint = found
+                .map(|(p, _)| {
+                    if p.env_vars.is_empty() {
+                        format!("provider '{}' has no env keys configured", p.id)
+                    } else {
+                        format!("set one of: {}", p.env_vars.join(", "))
+                    }
+                })
+                .unwrap_or_else(|| {
+                    "model not in registry; set the matching provider env var".to_string()
+                });
+            eprintln!("Error: no API key for model '{}': {}", model_id, hint);
+            std::process::exit(1);
+        }
+        return (model_id, api_key);
+    }
+
+    // 2. No --model: walk the priority list and pick the first provider
+    //    whose env key is configured. Always return a qualified id so the
+    //    agent knows exactly which provider to dispatch to.
+    for pid in DEFAULT_PROVIDER_PRIORITY {
+        if let Some(provider) = registry.provider(pid) {
+            if let Some((_, key)) = provider.resolve_env_key() {
+                if let Some(model) = provider.models.first() {
+                    return (format!("{}/{}", provider.id, model.id), Some(key));
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: try *any* provider the registry knows about that has an
+    //    env key configured (covers community providers added via
+    //    ~/.pi/providers/ that aren't in DEFAULT_PROVIDER_PRIORITY).
+    for provider in registry.providers() {
+        if let Some((_, key)) = provider.resolve_env_key() {
+            if let Some(model) = provider.models.first() {
+                return (format!("{}/{}", provider.id, model.id), Some(key));
+            }
+        }
+    }
+
+    // 4. Nothing configured.
+    let examples: Vec<&str> = DEFAULT_PROVIDER_PRIORITY
+        .iter()
+        .take(4)
+        .filter_map(|pid| registry.provider(pid))
+        .flat_map(|p| p.env_vars.iter().map(|s| s.as_str()))
+        .take(4)
+        .collect();
+    let hint = if examples.is_empty() {
+        "no providers have env keys configured".to_string()
+    } else {
+        format!("set one of: {}", examples.join(", "))
+    };
+
+    if strict {
+        eprintln!("Error: no API key found. {}", hint);
+        std::process::exit(1);
+    }
+    eprintln!("Warning: no API key found. {}. TUI will start in read-only mode.", hint);
+
+    // Fall back to an arbitrary model so the TUI still renders.
+    let fallback = registry
+        .all_models()
+        .next()
+        .map(|(p, m)| format!("{}/{}", p.id, m.id))
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4-6".to_string());
+    (fallback, None)
+}
 
 
 #[tokio::main]
@@ -27,32 +160,8 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Print { prompt, model }) => {
-            // Determine model and API key
-            let model_id = model.unwrap_or_else(|| {
-                // Auto-detect based on available API keys
-                if env::var("ANTHROPIC_API_KEY").is_ok() {
-                    "claude-sonnet-4-20250514".to_string()
-                } else if env::var("OPENAI_API_KEY").is_ok() {
-                    "gpt-4o".to_string()
-                } else {
-                    eprintln!("Error: No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.");
-                    std::process::exit(1);
-                }
-            });
-
-            // Resolve API key from environment based on model prefix
-            let api_key = if model_id.to_lowercase().contains("claude") || model_id.to_lowercase().contains("anthropic") {
-                env::var("ANTHROPIC_API_KEY").ok()
-            } else {
-                env::var("OPENAI_API_KEY").ok()
-            };
-            let api_key = match api_key {
-                Some(k) => k,
-                None => {
-                    eprintln!("Error: API key not found in environment.");
-                    std::process::exit(1);
-                }
-            };
+            let (model_id, api_key) = resolve_model_and_key(model, true);
+            let api_key = api_key.expect("resolve_model_and_key(strict=true) should exit if None");
 
             // Create agent with built-in tools
             let mut agent = Agent::new(&model_id)
@@ -141,24 +250,8 @@ async fn main() -> anyhow::Result<()> {
         None => {
             // Interactive mode: default
             info!("Starting interactive mode");
-            
-            // Create a basic agent with tools for interactive mode
-            let model_id = cli.model.unwrap_or_else(|| {
-                if env::var("ANTHROPIC_API_KEY").is_ok() {
-                    "claude-sonnet-4-20250514".to_string()
-                } else if env::var("OPENAI_API_KEY").is_ok() {
-                    "gpt-4o".to_string()
-                } else {
-                    eprintln!("Warning: No API key found. Set ANTHROPIC_API_KEY or OPENAI_API_KEY for full functionality.");
-                    "claude-sonnet-4-20250514".to_string()
-                }
-            });
 
-            let api_key = if model_id.to_lowercase().contains("claude") || model_id.to_lowercase().contains("anthropic") {
-                env::var("ANTHROPIC_API_KEY").ok()
-            } else {
-                env::var("OPENAI_API_KEY").ok()
-            };
+            let (model_id, api_key) = resolve_model_and_key(cli.model, false);
 
             let mut agent = Agent::new(&model_id);
             if let Some(key) = api_key {
