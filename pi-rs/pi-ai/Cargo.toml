@@ -1,0 +1,39 @@
+[package]
+name = "pi-ai"
+version = "0.1.0"
+edition = "2024"
+description = "AI client library with streaming support for multiple LLM providers"
+license = "MIT"
+
+[dependencies]
+# Workspace dependencies
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+aws-sigv4.workspace = true
+aws-credential-types.workspace = true
+http.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+url.workspace = true
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+reqwest-eventsource = "0.6"
+bytes = "1.0"
+
+# Serialization
+schemars = "0.8"
+
+# Tokio utilities
+tokio-util = "0.7"
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
