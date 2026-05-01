@@ -17,6 +17,45 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap, List, ListItem, Gauge};
 use std::time::Duration;
 use chrono::Local;
 
+/// Slash command info
+#[derive(Clone, Debug)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+/// Get all available slash commands
+fn get_all_slash_commands() -> Vec<SlashCommand> {
+    vec![
+        SlashCommand { name: "help".to_string(), description: "Show keyboard shortcuts".to_string() },
+        SlashCommand { name: "hotkeys".to_string(), description: "Show all keyboard shortcuts".to_string() },
+        SlashCommand { name: "model".to_string(), description: "Switch models (Ctrl+L also works)".to_string() },
+        SlashCommand { name: "settings".to_string(), description: "Edit settings (theme, thinking level)".to_string() },
+        SlashCommand { name: "login".to_string(), description: "OAuth authentication".to_string() },
+        SlashCommand { name: "logout".to_string(), description: "Clear authentication".to_string() },
+        SlashCommand { name: "new".to_string(), description: "Start fresh session".to_string() },
+        SlashCommand { name: "tree".to_string(), description: "Show session tree (Escape 2x also works)".to_string() },
+        SlashCommand { name: "session".to_string(), description: "Show session info (tokens, cost, path)".to_string() },
+        SlashCommand { name: "fork".to_string(), description: "Fork session from current point".to_string() },
+        SlashCommand { name: "export".to_string(), description: "Export session to HTML file".to_string() },
+        SlashCommand { name: "share".to_string(), description: "Share session as GitHub gist".to_string() },
+        SlashCommand { name: "compact".to_string(), description: "Manual context compaction".to_string() },
+        SlashCommand { name: "copy".to_string(), description: "Copy last assistant message".to_string() },
+        SlashCommand { name: "reload".to_string(), description: "Reload config and extensions".to_string() },
+        SlashCommand { name: "quit".to_string(), description: "Exit pi".to_string() },
+    ]
+}
+
+/// Filter commands by query
+fn filter_commands(query: &str, all_commands: &[SlashCommand]) -> Vec<SlashCommand> {
+    let query_lower = query.to_lowercase();
+    all_commands
+        .iter()
+        .filter(|cmd| cmd.name.contains(&query_lower))
+        .cloned()
+        .collect()
+}
+
 /// Message display with metadata
 #[derive(Clone, Debug)]
 pub struct ConversationMessage {
@@ -66,7 +105,12 @@ pub struct InteractiveMode {
     
     // Model selector state
     show_model_selector: bool,
-    selected_model_idx: usize,
+    selected_model_idx: usize,    
+    // Command palette
+    command_palette_active: bool,
+    command_palette_filtered: Vec<SlashCommand>,
+    command_palette_selected: usize,
+    all_slash_commands: Vec<SlashCommand>,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +147,11 @@ impl InteractiveMode {
             ctrl_c_count: 0,
             
             show_model_selector: false,
-            selected_model_idx: 0,
+            selected_model_idx: 0,            
+            command_palette_active: false,
+            command_palette_filtered: vec![],
+            command_palette_selected: 0,
+            all_slash_commands: get_all_slash_commands(),
         })
     }
 
@@ -155,9 +203,18 @@ impl InteractiveMode {
 
     async fn handle_key_command(&mut self, cmd: KeyCommand) -> Result<bool> {
         match cmd {
-            // **SEND MESSAGE** - Enter key (standard submit)
+            // **SEND MESSAGE or SELECT COMMAND** - Enter key
             KeyCommand::Enter => {
-                if self.show_model_selector {
+                if self.command_palette_active {
+                    // Select from command palette
+                    if !self.command_palette_filtered.is_empty() {
+                        let cmd = self.command_palette_filtered[self.command_palette_selected].name.clone();
+                        self.input_text = format!("/{}", cmd);
+                        self.command_palette_active = false;
+                        self.command_palette_filtered.clear();
+                        self.command_palette_selected = 0;
+                    }
+                } else if self.show_model_selector {
                     // In model selector, Enter to select model
                     self.show_model_selector = false;
                     self.status = "Model selected".to_string();
@@ -292,13 +349,24 @@ impl InteractiveMode {
                 Ok(true)
             }
 
-            // **REGULAR TEXT INPUT**
+            // **REGULAR TEXT INPUT** or COMMAND PALETTE
             KeyCommand::Char(c) => {
                 self.ctrl_c_count = 0;
                 self.input_text.push(c);
-                if self.input_text.starts_with('/') && self.input_text.len() == 1 {
-                    self.status = "Type / command (e.g., /model, /settings, /login)".to_string();
+                
+                // Activate command palette when '/' is typed
+                if self.input_text == "/" {
+                    self.command_palette_active = true;
+                    self.command_palette_filtered = self.all_slash_commands.clone();
+                    self.command_palette_selected = 0;
+                    self.status = "Type command name to filter, ↑↓ to navigate, Enter to select".to_string();
+                } else if self.input_text.starts_with('/') && self.command_palette_active {
+                    // Filter commands as user types
+                    let query = self.input_text[1..].trim(); // Remove '/' prefix
+                    self.command_palette_filtered = filter_commands(query, &self.all_slash_commands);
+                    self.command_palette_selected = 0;
                 }
+                
                 Ok(true)
             }
 
@@ -306,18 +374,37 @@ impl InteractiveMode {
             KeyCommand::Backspace => {
                 self.ctrl_c_count = 0;
                 self.input_text.pop();
+                
+                // Keep palette active while typing command
+                if self.input_text.starts_with('/') && self.input_text.len() > 1 {
+                    let query = self.input_text[1..].trim();
+                    self.command_palette_filtered = filter_commands(query, &self.all_slash_commands);
+                    self.command_palette_selected = 0;
+                } else if self.input_text == "/" {
+                    self.command_palette_active = true;
+                    self.command_palette_filtered = self.all_slash_commands.clone();
+                    self.command_palette_selected = 0;
+                } else {
+                    self.command_palette_active = false;
+                    self.command_palette_filtered.clear();
+                }
+                
                 Ok(true)
             }
 
-            // **NAVIGATION IN MODEL SELECTOR**
+            // **NAVIGATION IN MODEL SELECTOR or COMMAND PALETTE**
             KeyCommand::ArrowUp => {
-                if self.show_model_selector {
+                if self.command_palette_active && !self.command_palette_filtered.is_empty() {
+                    self.command_palette_selected = self.command_palette_selected.saturating_sub(1);
+                } else if self.show_model_selector {
                     self.selected_model_idx = self.selected_model_idx.saturating_sub(1);
                 }
                 Ok(true)
             }
             KeyCommand::ArrowDown => {
-                if self.show_model_selector {
+                if self.command_palette_active && !self.command_palette_filtered.is_empty() {
+                    self.command_palette_selected = (self.command_palette_selected + 1).min(self.command_palette_filtered.len() - 1);
+                } else if self.show_model_selector {
                     self.selected_model_idx += 1;
                 }
                 Ok(true)
@@ -325,8 +412,12 @@ impl InteractiveMode {
 
             // **TAB - AUTOCOMPLETE**
             KeyCommand::Tab => {
-                if self.input_text.starts_with('/') {
-                    self.autocomplete_slash_command();
+                if self.command_palette_active && !self.command_palette_filtered.is_empty() {
+                    // Auto-complete selected command
+                    let cmd = self.command_palette_filtered[self.command_palette_selected].name.clone();
+                    self.input_text = format!("/{}", cmd);
+                    self.command_palette_active = false;
+                    self.command_palette_filtered.clear();
                 }
                 Ok(true)
             }
