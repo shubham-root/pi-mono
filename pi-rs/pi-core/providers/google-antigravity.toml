@@ -1,0 +1,107 @@
+# Provider: Google Antigravity
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "google-antigravity"
+display_name = "Google Antigravity"
+env_vars = []
+
+[[models]]
+id = "claude-opus-4-5-thinking"
+name = "Claude Opus 4.5 Thinking (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-6-thinking"
+name = "Claude Opus 4.6 Thinking (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 128000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5 (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-5-thinking"
+name = "Claude Sonnet 4.5 Thinking (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-6"
+name = "Claude Sonnet 4.6 (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "gemini-3-flash"
+name = "Gemini 3 Flash (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1048576
+max_tokens = 65535
+cost = { input = 0.5, output = 3, cache_read = 0.5, cache_write = 0 }
+
+[[models]]
+id = "gemini-3.1-pro-high"
+name = "Gemini 3.1 Pro High (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1048576
+max_tokens = 65535
+cost = { input = 2, output = 12, cache_read = 0.2, cache_write = 2.375 }
+
+[[models]]
+id = "gemini-3.1-pro-low"
+name = "Gemini 3.1 Pro Low (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1048576
+max_tokens = 65535
+cost = { input = 2, output = 12, cache_read = 0.2, cache_write = 2.375 }
+
+[[models]]
+id = "gpt-oss-120b-medium"
+name = "GPT-OSS 120B Medium (Antigravity)"
+api = "google-gemini-cli"
+base_url = "https://daily-cloudcode-pa.sandbox.googleapis.com"
+reasoning = false
+input = ["text"]
+context_window = 131072
+max_tokens = 32768
+cost = { input = 0.09, output = 0.36, cache_read = 0, cache_write = 0 }

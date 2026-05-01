@@ -9,12 +9,10 @@ pub mod interactive;
 pub mod rpc;
 pub mod session_picker;
 pub mod settings_ui;
-pub mod model_selector;
-pub mod models;
+pub mod markdown;
 
 pub use print::PrintMode;
 pub use interactive::InteractiveMode;
 pub use rpc::RpcMode;
 pub use session_picker::SessionPicker;
 pub use settings_ui::SettingsUI;
-pub use model_selector::ModelSelector;

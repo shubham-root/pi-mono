@@ -1,0 +1,30 @@
+# Provider: MiniMax
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "minimax"
+display_name = "MiniMax"
+env_vars = ["MINIMAX_API_KEY"]
+
+[[models]]
+id = "MiniMax-M2.7"
+name = "MiniMax-M2.7"
+api = "anthropic-messages"
+base_url = "https://api.minimax.io/anthropic"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 0.3, output = 1.2, cache_read = 0.06, cache_write = 0.375 }
+
+[[models]]
+id = "MiniMax-M2.7-highspeed"
+name = "MiniMax-M2.7-highspeed"
+api = "anthropic-messages"
+base_url = "https://api.minimax.io/anthropic"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 0.6, output = 2.4, cache_read = 0.06, cache_write = 0.375 }

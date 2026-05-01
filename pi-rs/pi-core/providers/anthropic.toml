@@ -1,0 +1,261 @@
+# Provider: Anthropic
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "anthropic"
+display_name = "Anthropic"
+env_vars = ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+
+[[models]]
+id = "claude-3-5-haiku-20241022"
+name = "Claude Haiku 3.5"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 8192
+cost = { input = 0.8, output = 4, cache_read = 0.08, cache_write = 1 }
+
+[[models]]
+id = "claude-3-5-haiku-latest"
+name = "Claude Haiku 3.5 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 8192
+cost = { input = 0.8, output = 4, cache_read = 0.08, cache_write = 1 }
+
+[[models]]
+id = "claude-3-5-sonnet-20240620"
+name = "Claude Sonnet 3.5"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 8192
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-3-5-sonnet-20241022"
+name = "Claude Sonnet 3.5 v2"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 8192
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-3-7-sonnet-20250219"
+name = "Claude Sonnet 3.7"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-3-haiku-20240307"
+name = "Claude Haiku 3"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 4096
+cost = { input = 0.25, output = 1.25, cache_read = 0.03, cache_write = 0.3 }
+
+[[models]]
+id = "claude-3-opus-20240229"
+name = "Claude Opus 3"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 4096
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-3-sonnet-20240229"
+name = "Claude Sonnet 3"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 4096
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 0.3 }
+
+[[models]]
+id = "claude-haiku-4-5"
+name = "Claude Haiku 4.5 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 1, output = 5, cache_read = 0.1, cache_write = 1.25 }
+
+[[models]]
+id = "claude-haiku-4-5-20251001"
+name = "Claude Haiku 4.5"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 1, output = 5, cache_read = 0.1, cache_write = 1.25 }
+
+[[models]]
+id = "claude-opus-4-0"
+name = "Claude Opus 4 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 32000
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-opus-4-1"
+name = "Claude Opus 4.1 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 32000
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-opus-4-1-20250805"
+name = "Claude Opus 4.1"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 32000
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-opus-4-20250514"
+name = "Claude Opus 4"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 32000
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-opus-4-5"
+name = "Claude Opus 4.5 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-5-20251101"
+name = "Claude Opus 4.5"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-6"
+name = "Claude Opus 4.6"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 128000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-7"
+name = "Claude Opus 4.7"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 128000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-sonnet-4-0"
+name = "Claude Sonnet 4 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-20250514"
+name = "Claude Sonnet 4"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5 (latest)"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-5-20250929"
+name = "Claude Sonnet 4.5"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-6"
+name = "Claude Sonnet 4.6"
+api = "anthropic-messages"
+base_url = "https://api.anthropic.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }

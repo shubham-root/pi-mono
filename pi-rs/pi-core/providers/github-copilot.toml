@@ -1,0 +1,294 @@
+# Provider: GitHub Copilot
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "github-copilot"
+display_name = "GitHub Copilot"
+env_vars = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+
+[[models]]
+id = "claude-haiku-4.5"
+name = "Claude Haiku 4.5"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 144000
+max_tokens = 32000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-opus-4.5"
+name = "Claude Opus 4.5"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 160000
+max_tokens = 32000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-opus-4.6"
+name = "Claude Opus 4.6"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-opus-4.7"
+name = "Claude Opus 4.7"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 144000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-sonnet-4"
+name = "Claude Sonnet 4"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 216000
+max_tokens = 16000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-sonnet-4.5"
+name = "Claude Sonnet 4.5"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 144000
+max_tokens = 32000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-sonnet-4.6"
+name = "Claude Sonnet 4.6"
+api = "anthropic-messages"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 32000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gemini-2.5-pro"
+name = "Gemini 2.5 Pro"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gemini-3-flash-preview"
+name = "Gemini 3 Flash"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gemini-3-pro-preview"
+name = "Gemini 3 Pro Preview"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gemini-3.1-pro-preview"
+name = "Gemini 3.1 Pro Preview"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-4.1"
+name = "GPT-4.1"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 16384
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-4o"
+name = "GPT-4o"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = false
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 4096
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5"
+name = "GPT-5"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 128000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5-mini"
+name = "GPT-5-mini"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 264000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1"
+name = "GPT-5.1"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 264000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex"
+name = "GPT-5.1-Codex"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex-max"
+name = "GPT-5.1-Codex-max"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex-mini"
+name = "GPT-5.1-Codex-mini"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.2"
+name = "GPT-5.2"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 264000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.2-codex"
+name = "GPT-5.2-Codex"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.3-codex"
+name = "GPT-5.3-Codex"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4"
+name = "GPT-5.4"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4-mini"
+name = "GPT-5.4 Mini"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.5"
+name = "GPT-5.5"
+api = "openai-responses"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "grok-code-fast-1"
+name = "Grok Code Fast 1"
+api = "openai-completions"
+base_url = "https://api.individual.githubcopilot.com"
+reasoning = true
+input = ["text"]
+context_window = 128000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }

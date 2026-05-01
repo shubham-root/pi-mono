@@ -1,0 +1,30 @@
+# Provider: DeepSeek
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "deepseek"
+display_name = "DeepSeek"
+env_vars = ["DEEPSEEK_API_KEY"]
+
+[[models]]
+id = "deepseek-v4-flash"
+name = "DeepSeek V4 Flash"
+api = "openai-completions"
+base_url = "https://api.deepseek.com"
+reasoning = true
+input = ["text"]
+context_window = 1000000
+max_tokens = 384000
+cost = { input = 0.14, output = 0.28, cache_read = 0.0028, cache_write = 0 }
+
+[[models]]
+id = "deepseek-v4-pro"
+name = "DeepSeek V4 Pro"
+api = "openai-completions"
+base_url = "https://api.deepseek.com"
+reasoning = true
+input = ["text"]
+context_window = 1000000
+max_tokens = 384000
+cost = { input = 0.435, output = 0.87, cache_read = 0.003625, cache_write = 0 }

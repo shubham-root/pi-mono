@@ -1,0 +1,41 @@
+# Provider: Kimi
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "kimi-coding"
+display_name = "Kimi"
+env_vars = ["KIMI_API_KEY"]
+
+[[models]]
+id = "k2p6"
+name = "Kimi K2.6"
+api = "anthropic-messages"
+base_url = "https://api.kimi.com/coding"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 32768
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "kimi-for-coding"
+name = "Kimi For Coding"
+api = "anthropic-messages"
+base_url = "https://api.kimi.com/coding"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 32768
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "kimi-k2-thinking"
+name = "Kimi K2 Thinking"
+api = "anthropic-messages"
+base_url = "https://api.kimi.com/coding"
+reasoning = true
+input = ["text"]
+context_window = 262144
+max_tokens = 32768
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }

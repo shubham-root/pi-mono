@@ -14,7 +14,7 @@ mod agent_test;
 mod integration_test;
 
 // Re-exports
-pub use agent::Agent;
+pub use agent::{Agent, AgentEvent};
 pub use settings::Settings;
 pub use session::{Session, SessionManager, SessionId};
 pub use system_prompt::SystemPromptBuilder;

@@ -1,0 +1,426 @@
+# Provider: OpenCode
+# Auto-generated from TypeScript; edit freely to add/remove models.
+# To add a new model, append a [[models]] block.
+# To remove or customize the built-in list, drop a file with the same id into ~/.pi/providers/
+
+id = "opencode"
+display_name = "OpenCode"
+env_vars = ["OPENCODE_API_KEY"]
+
+[[models]]
+id = "big-pickle"
+name = "Big Pickle"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text"]
+context_window = 200000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "claude-haiku-4-5"
+name = "Claude Haiku 4.5"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 1, output = 5, cache_read = 0.1, cache_write = 1.25 }
+
+[[models]]
+id = "claude-opus-4-1"
+name = "Claude Opus 4.1"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 32000
+cost = { input = 15, output = 75, cache_read = 1.5, cache_write = 18.75 }
+
+[[models]]
+id = "claude-opus-4-5"
+name = "Claude Opus 4.5"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-6"
+name = "Claude Opus 4.6"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 128000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-opus-4-7"
+name = "Claude Opus 4.7"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 128000
+cost = { input = 5, output = 25, cache_read = 0.5, cache_write = 6.25 }
+
+[[models]]
+id = "claude-sonnet-4"
+name = "Claude Sonnet 4"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-5"
+name = "Claude Sonnet 4.5"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "claude-sonnet-4-6"
+name = "Claude Sonnet 4.6"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 1000000
+max_tokens = 64000
+cost = { input = 3, output = 15, cache_read = 0.3, cache_write = 3.75 }
+
+[[models]]
+id = "gemini-3-flash"
+name = "Gemini 3 Flash"
+api = "google-generative-ai"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 1048576
+max_tokens = 65536
+cost = { input = 0.5, output = 3, cache_read = 0.05, cache_write = 0 }
+
+[[models]]
+id = "gemini-3.1-pro"
+name = "Gemini 3.1 Pro Preview"
+api = "google-generative-ai"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 1048576
+max_tokens = 65536
+cost = { input = 2, output = 12, cache_read = 0.2, cache_write = 0 }
+
+[[models]]
+id = "glm-5"
+name = "GLM-5"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 1, output = 3.2, cache_read = 0.2, cache_write = 0 }
+
+[[models]]
+id = "glm-5.1"
+name = "GLM-5.1"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 1.4, output = 4.4, cache_read = 0.26, cache_write = 0 }
+
+[[models]]
+id = "gpt-5"
+name = "GPT-5"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.07, output = 8.5, cache_read = 0.107, cache_write = 0 }
+
+[[models]]
+id = "gpt-5-codex"
+name = "GPT-5 Codex"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.07, output = 8.5, cache_read = 0.107, cache_write = 0 }
+
+[[models]]
+id = "gpt-5-nano"
+name = "GPT-5 Nano"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1"
+name = "GPT-5.1"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.07, output = 8.5, cache_read = 0.107, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex"
+name = "GPT-5.1 Codex"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.07, output = 8.5, cache_read = 0.107, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex-max"
+name = "GPT-5.1 Codex Max"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.25, output = 10, cache_read = 0.125, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.1-codex-mini"
+name = "GPT-5.1 Codex Mini"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0.25, output = 2, cache_read = 0.025, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.2"
+name = "GPT-5.2"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.75, output = 14, cache_read = 0.175, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.2-codex"
+name = "GPT-5.2 Codex"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.75, output = 14, cache_read = 0.175, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.3-codex"
+name = "GPT-5.3 Codex"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 1.75, output = 14, cache_read = 0.175, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4"
+name = "GPT-5.4"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 272000
+max_tokens = 128000
+cost = { input = 2.5, output = 15, cache_read = 0.25, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4-mini"
+name = "GPT-5.4 Mini"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0.75, output = 4.5, cache_read = 0.075, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4-nano"
+name = "GPT-5.4 Nano"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 400000
+max_tokens = 128000
+cost = { input = 0.2, output = 1.25, cache_read = 0.02, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.4-pro"
+name = "GPT-5.4 Pro"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 1050000
+max_tokens = 128000
+cost = { input = 30, output = 180, cache_read = 30, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.5"
+name = "GPT-5.5"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 1050000
+max_tokens = 128000
+cost = { input = 5, output = 30, cache_read = 0.5, cache_write = 0 }
+
+[[models]]
+id = "gpt-5.5-pro"
+name = "GPT-5.5 Pro"
+api = "openai-responses"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 1050000
+max_tokens = 128000
+cost = { input = 30, output = 180, cache_read = 30, cache_write = 0 }
+
+[[models]]
+id = "hy3-preview-free"
+name = "Hy3 preview Free"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 256000
+max_tokens = 64000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "kimi-k2.5"
+name = "Kimi K2.5"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 65536
+cost = { input = 0.6, output = 3, cache_read = 0.08, cache_write = 0 }
+
+[[models]]
+id = "kimi-k2.6"
+name = "Kimi K2.6"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 65536
+cost = { input = 0.95, output = 4, cache_read = 0.16, cache_write = 0 }
+
+[[models]]
+id = "minimax-m2.5"
+name = "MiniMax M2.5"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 0.3, output = 1.2, cache_read = 0.06, cache_write = 0 }
+
+[[models]]
+id = "minimax-m2.5-free"
+name = "MiniMax M2.5 Free"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "minimax-m2.7"
+name = "MiniMax M2.7"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 131072
+cost = { input = 0.3, output = 1.2, cache_read = 0.06, cache_write = 0 }
+
+[[models]]
+id = "nemotron-3-super-free"
+name = "Nemotron 3 Super Free"
+api = "openai-completions"
+base_url = "https://opencode.ai/zen/v1"
+reasoning = true
+input = ["text"]
+context_window = 204800
+max_tokens = 128000
+cost = { input = 0, output = 0, cache_read = 0, cache_write = 0 }
+
+[[models]]
+id = "qwen3.5-plus"
+name = "Qwen3.5 Plus"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 65536
+cost = { input = 0.2, output = 1.2, cache_read = 0.02, cache_write = 0.25 }
+
+[[models]]
+id = "qwen3.6-plus"
+name = "Qwen3.6 Plus"
+api = "anthropic-messages"
+base_url = "https://opencode.ai/zen"
+reasoning = true
+input = ["text", "image"]
+context_window = 262144
+max_tokens = 65536
+cost = { input = 0.5, output = 3, cache_read = 0.05, cache_write = 0.625 }
