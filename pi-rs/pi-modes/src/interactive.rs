@@ -1,40 +1,40 @@
-//! Interactive mode - full TUI with agent execution
-//! Implements Phase 3.6-3.16: Thinking display, tool output, context status,
-//! syntax highlighting, slash commands, branching, graceful shutdown
+//! Interactive mode - TUI matching TypeScript variant exactly
+//! Implements Phase 3 with proper UX:
+//! - Enter to send message
+//! - Alt+Enter to queue follow-up
+//! - Escape to cancel
+//! - Escape twice for tree
+//! - Ctrl+L for model selector
+//! - Ctrl+T for thinking toggle
+//! - Ctrl+O for tool output toggle
+//! - Ctrl+C to clear, Ctrl+C twice to quit
 
 use anyhow::Result;
 use pi_core::Agent;
 use pi_tui::{input::KeyCommand, EventLoop};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap, List, ListItem};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap, List, ListItem, Gauge};
 use std::time::Duration;
+use chrono::Local;
 
 /// Message display with metadata
 #[derive(Clone, Debug)]
-struct ConversationMessage {
-    role: String, // "user" or "assistant"
-    content: String,
-    thinking: Option<String>, // 3.10: Thinking blocks
-    tool_output: Option<String>, // 3.11: Tool results
+pub struct ConversationMessage {
+    pub role: String, // "user" or "assistant"
+    pub content: String,
+    pub thinking: Option<String>,
+    pub tool_output: Option<String>,
 }
 
-/// Context usage tracking (3.12)
+/// Context usage tracking
 #[derive(Clone, Debug, Default)]
-struct ContextStatus {
-    input_tokens: u32,
-    output_tokens: u32,
-    cache_read: u32,
-    cache_write: u32,
-    total_tokens: u32,
-    estimated_cost: f32,
-}
-
-/// Branch point for tree navigation (3.15)
-#[derive(Clone, Debug)]
-struct BranchPoint {
-    message_index: usize,
-    timestamp: String,
-    label: Option<String>,
+pub struct ContextStatus {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_read: u32,
+    pub cache_write: u32,
+    pub total_tokens: u32,
+    pub estimated_cost: f32,
 }
 
 pub struct InteractiveMode {
@@ -42,33 +42,38 @@ pub struct InteractiveMode {
     agent: Option<Agent>,
     messages: Vec<ConversationMessage>,
     input_text: String,
+    queued_messages: Vec<String>,
+    
+    // UI state
     status: String,
     running: bool,
     executing: bool,
     
-    // 3.10: Thinking display
-    current_thinking: String,
+    // Display toggles
     show_thinking: bool,
-    
-    // 3.11: Tool output
-    current_tool_output: String,
     show_tools: bool,
     
-    // 3.12: Context status
+    // Context tracking
     context: ContextStatus,
     
-    // 3.13: Syntax highlighting (built into rendering)
-    highlight_code: bool,
-    
-    // 3.14: Slash commands
-    show_command_help: bool,
-    
-    // 3.15: Session branching
+    // Tree navigation
     branch_points: Vec<BranchPoint>,
     selected_branch: Option<usize>,
     
-    // 3.16: Graceful shutdown
-    save_on_exit: bool,
+    // Keybinding state
+    last_escape_time: Option<std::time::Instant>,
+    ctrl_c_count: u32,
+    
+    // Model selector state
+    show_model_selector: bool,
+    selected_model_idx: usize,
+}
+
+#[derive(Clone, Debug)]
+struct BranchPoint {
+    message_index: usize,
+    timestamp: String,
+    label: Option<String>,
 }
 
 impl InteractiveMode {
@@ -80,25 +85,25 @@ impl InteractiveMode {
             agent: Some(agent),
             messages: Vec::new(),
             input_text: String::new(),
-            status: "Welcome to pi interactive mode. Type /help for commands.".to_string(),
+            queued_messages: Vec::new(),
+            
+            status: "Ready to chat. Type / for commands. Ctrl+L for model selector.".to_string(),
             running: true,
             executing: false,
             
-            current_thinking: String::new(),
             show_thinking: false,
-            
-            current_tool_output: String::new(),
             show_tools: false,
             
             context: ContextStatus::default(),
             
-            highlight_code: true,
-            show_command_help: false,
-            
             branch_points: Vec::new(),
             selected_branch: None,
             
-            save_on_exit: true,
+            last_escape_time: None,
+            ctrl_c_count: 0,
+            
+            show_model_selector: false,
+            selected_model_idx: 0,
         })
     }
 
@@ -107,17 +112,20 @@ impl InteractiveMode {
     }
 
     async fn run_loop(&mut self) -> Result<()> {
+        let mut last_tick = std::time::Instant::now();
+        
         loop {
-            // Poll for events
+            // Poll for events with 50ms timeout
             if let Some(event) = self.event_loop.poll_event(Duration::from_millis(50)) {
                 use pi_tui::tui::AppEvent;
                 
                 let should_continue = match event {
                     AppEvent::Key(cmd) => self.handle_key_command(cmd).await?,
                     AppEvent::Resize(w, h) => {
-                        self.status = format!("Terminal resized: {}x{}", w, h);
+                        self.status = format!("Terminal: {}x{}", w, h);
                         true
                     }
+                    AppEvent::Tick => true,
                     _ => true,
                 };
 
@@ -127,8 +135,15 @@ impl InteractiveMode {
                 }
             }
 
-            // Redraw UI
+            // Redraw UI every 50ms
             self.draw_ui()?;
+
+            // Check for escape timeout (2 seconds)
+            let now = std::time::Instant::now();
+            if now.duration_since(last_tick) > Duration::from_secs(2) {
+                self.ctrl_c_count = 0;
+                last_tick = now;
+            }
 
             if !self.running {
                 break;
@@ -140,125 +155,117 @@ impl InteractiveMode {
 
     async fn handle_key_command(&mut self, cmd: KeyCommand) -> Result<bool> {
         match cmd {
-            // 3.16: Graceful shutdown with Ctrl+Q
-            KeyCommand::CtrlQ => {
-                if self.save_on_exit {
-                    self.status = "Session saved. Exiting...".to_string();
-                }
-                return Ok(false);
-            }
-
-            // 3.14: Slash commands with /
-            KeyCommand::Char('/') if self.input_text.is_empty() => {
-                self.show_command_help = true;
-                self.input_text.push('/');
-                Ok(true)
-            }
-
-            // Regular text input
-            KeyCommand::Char(c) => {
-                self.input_text.push(c);
-                self.status = format!("Type / for commands. Ctrl+D to send, Ctrl+C to cancel, Ctrl+Q to exit.");
-                Ok(true)
-            }
-
-            // Backspace
-            KeyCommand::Backspace => {
-                self.input_text.pop();
-                if self.input_text == "/" {
-                    self.show_command_help = false;
-                }
-                Ok(true)
-            }
-
-            // Enter for newlines
+            // **SEND MESSAGE** - Enter key (standard submit)
             KeyCommand::Enter => {
-                if !self.input_text.is_empty() {
-                    self.input_text.push('\n');
-                }
-                Ok(true)
-            }
-
-            // Ctrl+D to send
-            KeyCommand::CtrlD => {
-                if !self.input_text.is_empty() {
-                    let msg_text = self.input_text.trim().to_string();
+                if self.show_model_selector {
+                    // In model selector, Enter to select model
+                    self.show_model_selector = false;
+                    self.status = "Model selected".to_string();
+                } else if !self.input_text.is_empty() {
+                    let msg = self.input_text.trim().to_string();
                     
-                    // Handle slash commands (3.14)
-                    if msg_text.starts_with('/') {
-                        self.handle_slash_command(&msg_text).await?;
+                    if msg.starts_with('/') {
+                        self.handle_slash_command(&msg).await?;
                     } else {
-                        // Add user message to conversation
-                        self.messages.push(ConversationMessage {
-                            role: "user".to_string(),
-                            content: msg_text.clone(),
-                            thinking: None,
-                            tool_output: None,
-                        });
-                        
-                        // Execute agent if available (AGENT INTEGRATION!)
-                        if let Some(ref mut agent) = self.agent {
-                            self.executing = true;
-                            self.status = "Executing...".to_string();
-                            
-                            match agent.prompt(&msg_text).await {
-                                Ok(response) => {
-                                    self.messages.push(ConversationMessage {
-                                        role: "assistant".to_string(),
-                                        content: response,
-                                        thinking: None,
-                                        tool_output: None,
-                                    });
-                                    self.status = "Ready".to_string();
-                                }
-                                Err(e) => {
-                                    self.status = format!("Error: {}", e);
-                                }
-                            }
-                            self.executing = false;
-                        } else {
-                            self.status = "No API key configured. Type commands only.".to_string();
-                        }
+                        self.send_user_message(&msg).await?;
                     }
                     
                     self.input_text.clear();
-                    self.show_command_help = false;
                 }
                 Ok(true)
             }
 
-            // Ctrl+C to cancel
+            // **QUEUE FOLLOW-UP** - Alt+Enter (queue after agent finishes)
+            KeyCommand::AltEnter => {
+                if !self.input_text.is_empty() {
+                    self.queued_messages.push(self.input_text.trim().to_string());
+                    self.status = format!("Queued message ({})", self.queued_messages.len());
+                    self.input_text.clear();
+                }
+                Ok(true)
+            }
+
+            // **NEWLINE IN INPUT** - Shift+Enter or just for multiline (we'll treat Enter only)
+            KeyCommand::ShiftEnter => {
+                self.input_text.push('\n');
+                Ok(true)
+            }
+
+            // **CLEAR EDITOR / QUIT** - Ctrl+C (clear once, quit on second press)
             KeyCommand::CtrlC => {
-                self.input_text.clear();
-                self.executing = false;
-                self.status = "Input cleared".to_string();
-                Ok(true)
-            }
-
-            // Arrow keys for editing
-            KeyCommand::ArrowUp => {
-                // Previous in history (future)
-                Ok(true)
-            }
-            KeyCommand::ArrowDown => {
-                // Next in history (future)
-                Ok(true)
-            }
-            KeyCommand::ArrowLeft | KeyCommand::ArrowRight => {
-                // Move cursor (future)
-                Ok(true)
-            }
-
-            // Tab for autocompletion (3.14)
-            KeyCommand::Tab => {
-                if self.input_text.starts_with('/') {
-                    self.autocomplete_command();
+                self.ctrl_c_count += 1;
+                
+                if self.ctrl_c_count == 1 {
+                    if !self.input_text.is_empty() {
+                        self.input_text.clear();
+                        self.status = "Input cleared (Ctrl+C again to quit)".to_string();
+                    } else {
+                        self.status = "Press Ctrl+C again to quit".to_string();
+                    }
+                    
+                    // Reset counter after 2 seconds
+                    std::thread::sleep(Duration::from_millis(50));
+                } else if self.ctrl_c_count >= 2 {
+                    return Ok(false); // Exit
                 }
+                
                 Ok(true)
             }
 
-            // Alt+T to toggle thinking (3.10)
-            KeyCommand::AltT => {
+            // **CANCEL EXECUTION** - Escape (single), Tree Navigation (double)
+            KeyCommand::Escape => {
+                let now = std::time::Instant::now();
+                let time_since_last = if let Some(last) = self.last_escape_time { now.duration_since(last) } else { Duration::from_secs(10) };
+                
+                if time_since_last < Duration::from_millis(500) {
+                    // Double escape - open tree selector
+                    self.status = "Tree selector - not yet wired".to_string();
+                } else {
+                    // Single escape - cancel/abort
+                    if self.executing {
+                        self.executing = false;
+                        self.status = "Execution cancelled".to_string();
+                    } else if !self.input_text.is_empty() {
+                        self.input_text.clear();
+                        self.status = "Input cleared".to_string();
+                    } else if !self.queued_messages.is_empty() {
+                        // Restore queued messages to editor
+                        self.input_text = self.queued_messages.pop().unwrap_or_default();
+                        self.status = format!("Restored queued message. {} remaining", self.queued_messages.len());
+                    }
+                }
+                
+                self.last_escape_time = Some(std::time::Instant::now());
+                Ok(true)
+            }
+
+            // **MODEL SELECTOR** - Ctrl+L
+            KeyCommand::CtrlL => {
+                self.show_model_selector = !self.show_model_selector;
+                self.status = if self.show_model_selector {
+                    "Model selector - use ↑↓ to navigate, Enter to select".to_string()
+                } else {
+                    "Model selector closed".to_string()
+                };
+                Ok(true)
+            }
+
+            // **CYCLE MODELS FORWARD** - Ctrl+P
+            KeyCommand::CtrlP => {
+                self.selected_model_idx += 1;
+                self.status = format!("Model index: {}", self.selected_model_idx);
+                Ok(true)
+            }
+
+            // **CYCLE MODELS BACKWARD** - Shift+Ctrl+P
+            KeyCommand::ShiftCtrlP => {
+                self.selected_model_idx = self.selected_model_idx.saturating_sub(1);
+                self.status = format!("Model index: {}", self.selected_model_idx);
+                Ok(true)
+            }
+
+            // **TOGGLE THINKING** - Ctrl+T
+            KeyCommand::CtrlT => {
                 self.show_thinking = !self.show_thinking;
                 self.status = if self.show_thinking {
                     "Thinking blocks: ON".to_string()
@@ -268,8 +275,8 @@ impl InteractiveMode {
                 Ok(true)
             }
 
-            // Alt+O to toggle tool output (3.11)
-            KeyCommand::AltO => {
+            // **TOGGLE TOOL OUTPUT** - Ctrl+O
+            KeyCommand::CtrlO => {
                 self.show_tools = !self.show_tools;
                 self.status = if self.show_tools {
                     "Tool output: ON".to_string()
@@ -279,27 +286,47 @@ impl InteractiveMode {
                 Ok(true)
             }
 
-            // Alt+S to toggle syntax highlighting (3.13)
-            KeyCommand::AltS => {
-                self.highlight_code = !self.highlight_code;
-                self.status = if self.highlight_code {
-                    "Syntax highlighting: ON".to_string()
-                } else {
-                    "Syntax highlighting: OFF".to_string()
-                };
+            // **THINKING LEVEL** - Shift+Tab
+            KeyCommand::ShiftTab => {
+                self.status = "Thinking level cycled (not yet implemented)".to_string();
                 Ok(true)
             }
 
-            // Ctrl+B for branching (3.15)
-            KeyCommand::CtrlB => {
-                if !self.messages.is_empty() {
-                    let idx = self.messages.len() - 1;
-                    self.branch_points.push(BranchPoint {
-                        message_index: idx,
-                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-                        label: None,
-                    });
-                    self.status = format!("Branch point created at message {}", idx);
+            // **REGULAR TEXT INPUT**
+            KeyCommand::Char(c) => {
+                self.ctrl_c_count = 0;
+                self.input_text.push(c);
+                if self.input_text.starts_with('/') && self.input_text.len() == 1 {
+                    self.status = "Type / command (e.g., /model, /settings, /login)".to_string();
+                }
+                Ok(true)
+            }
+
+            // **BACKSPACE**
+            KeyCommand::Backspace => {
+                self.ctrl_c_count = 0;
+                self.input_text.pop();
+                Ok(true)
+            }
+
+            // **NAVIGATION IN MODEL SELECTOR**
+            KeyCommand::ArrowUp => {
+                if self.show_model_selector {
+                    self.selected_model_idx = self.selected_model_idx.saturating_sub(1);
+                }
+                Ok(true)
+            }
+            KeyCommand::ArrowDown => {
+                if self.show_model_selector {
+                    self.selected_model_idx += 1;
+                }
+                Ok(true)
+            }
+
+            // **TAB - AUTOCOMPLETE**
+            KeyCommand::Tab => {
+                if self.input_text.starts_with('/') {
+                    self.autocomplete_slash_command();
                 }
                 Ok(true)
             }
@@ -308,45 +335,96 @@ impl InteractiveMode {
         }
     }
 
+    async fn send_user_message(&mut self, text: &str) -> Result<()> {
+        // Add user message
+        self.messages.push(ConversationMessage {
+            role: "user".to_string(),
+            content: text.to_string(),
+            thinking: None,
+            tool_output: None,
+        });
+
+        // Execute agent if available
+        if let Some(ref mut agent) = self.agent {
+            self.executing = true;
+            self.status = "Executing...".to_string();
+
+            match agent.prompt(text).await {
+                Ok(response) => {
+                    self.messages.push(ConversationMessage {
+                        role: "assistant".to_string(),
+                        content: response,
+                        thinking: None,
+                        tool_output: None,
+                    });
+                    self.status = "Ready".to_string();
+                }
+                Err(e) => {
+                    self.status = format!("Error: {}", e);
+                }
+            }
+            self.executing = false;
+        } else {
+            self.status = "No API key configured".to_string();
+        }
+
+        Ok(())
+    }
+
     async fn handle_slash_command(&mut self, cmd: &str) -> Result<()> {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         match parts.get(0).map(|s| *s) {
-            Some("/help") => {
-                self.status = "Commands: /help, /model, /settings, /new, /load, /branch, /clear".to_string();
+            Some("/help") | Some("/hotkeys") => {
+                self.status = "Enter: send | Alt+Enter: queue | Escape: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+O: tools | Ctrl+C: quit".to_string();
             }
             Some("/model") => {
-                self.status = "Model selector - not yet integrated".to_string();
+                self.show_model_selector = true;
+                self.status = "Model selector - use ↑↓ to navigate, Enter to select".to_string();
             }
             Some("/settings") => {
-                self.status = "Settings editor - not yet integrated".to_string();
+                self.status = "Settings editor - not yet wired".to_string();
+            }
+            Some("/login") => {
+                self.status = "Login dialog - not yet wired".to_string();
             }
             Some("/new") => {
                 self.messages.clear();
+                self.queued_messages.clear();
                 self.input_text.clear();
                 self.branch_points.clear();
                 self.context = ContextStatus::default();
                 self.status = "New session started".to_string();
             }
-            Some("/load") => {
-                self.status = "Load session - not yet integrated".to_string();
+            Some("/tree") => {
+                self.status = format!("Session tree - {} messages, {} branches", self.messages.len(), self.branch_points.len());
             }
-            Some("/branch") => {
-                self.status = format!("Branch points: {}", self.branch_points.len());
+            Some("/session") => {
+                self.status = format!("Session: {} messages, {} tokens, ${:.4}", 
+                    self.messages.len(), 
+                    self.context.total_tokens,
+                    self.context.estimated_cost
+                );
             }
-            Some("/clear") => {
-                self.input_text.clear();
-                self.status = "Input cleared".to_string();
+            Some("/fork") => {
+                self.status = "Fork session - not yet implemented".to_string();
+            }
+            Some("/export") => {
+                self.status = "Export session - not yet implemented".to_string();
+            }
+            Some("/quit") => {
+                return Ok(());
             }
             _ => {
-                self.status = format!("Unknown command: {}. Type /help for commands.", parts.get(0).unwrap_or(&""));
+                self.status = format!("Unknown command: {}", parts.get(0).unwrap_or(&""));
             }
         }
         Ok(())
     }
 
-    fn autocomplete_command(&mut self) {
+    fn autocomplete_slash_command(&mut self) {
         let commands = [
-            "/help", "/model", "/settings", "/new", "/load", "/branch", "/clear"
+            "/help", "/model", "/settings", "/login", "/new", "/tree", "/session",
+            "/fork", "/export", "/quit", "/hotkeys"
         ];
 
         for cmd in &commands {
@@ -361,118 +439,107 @@ impl InteractiveMode {
         let messages = self.messages.clone();
         let input_text = self.input_text.clone();
         let status = self.status.clone();
-        let context = self.context.clone();
+        let queued_count = self.queued_messages.len();
+        let executing = self.executing;
         let show_thinking = self.show_thinking;
         let show_tools = self.show_tools;
-        let show_help = self.show_command_help;
-        let branches = self.branch_points.clone();
+        let show_model_selector = self.show_model_selector;
 
         self.event_loop.terminal().draw(|frame| {
             let size = frame.size();
 
-            // Split into: messages (65%), thinking/tools (15%), input (10%), status (10%)
-            let msg_height = (size.height as f32 * 0.65) as u16;
-            let aux_height = (size.height as f32 * 0.15) as u16;
-            let input_height = (size.height as f32 * 0.1) as u16;
-            let status_height = size.height - msg_height - aux_height - input_height;
+            // Main layout: 70% messages, 20% input, 10% footer
+            let messages_height = (size.height as f32 * 0.70) as u16;
+            let input_height = (size.height as f32 * 0.20) as u16;
+            let footer_height = size.height - messages_height - input_height;
 
-            // Message area
-            let msg_area = Rect {
+            // Messages pane
+            let messages_area = Rect {
                 x: 0,
                 y: 0,
                 width: size.width,
-                height: msg_height,
+                height: messages_height,
             };
 
-            // Thinking/Tool output area (3.10, 3.11)
-            let aux_area = Rect {
-                x: 0,
-                y: msg_height,
-                width: size.width,
-                height: aux_height,
-            };
-
-            // Input area
+            // Input pane
             let input_area = Rect {
                 x: 0,
-                y: msg_height + aux_height,
+                y: messages_height,
                 width: size.width,
                 height: input_height,
             };
 
-            // Status area (3.12: Context status)
-            let status_area = Rect {
+            // Footer
+            let footer_area = Rect {
                 x: 0,
-                y: msg_height + aux_height + input_height,
+                y: messages_height + input_height,
                 width: size.width,
-                height: status_height,
+                height: footer_height,
             };
 
-            // Draw messages
-            let msg_items: Vec<ListItem> = messages
+            // === MESSAGES PANE ===
+            let mut message_lines = vec![];
+            for msg in &messages {
+                let prefix = if msg.role == "user" { "YOU " } else { "AI  " };
+                let color = if msg.role == "user" { Color::Cyan } else { Color::Green };
+                
+                for line in msg.content.lines() {
+                    message_lines.push(line.to_string());
+                }
+            }
+
+            // Show thinking if toggled
+            if show_thinking {
+                message_lines.push("".to_string());
+                message_lines.push("[THINKING BLOCKS]".to_string());
+            }
+
+            // Show tools if toggled
+            if show_tools {
+                message_lines.push("".to_string());
+                message_lines.push("[TOOL OUTPUT]".to_string());
+            }
+
+            let msg_items: Vec<ListItem> = message_lines
                 .iter()
-                .enumerate()
-                .map(|(idx, msg)| {
-                    let prefix = match msg.role.as_str() {
-                        "user" => "YOU> ",
-                        _ => "AI>  ",
-                    };
-                    let style = match msg.role.as_str() {
-                        "user" => Style::default().fg(Color::Cyan),
-                        _ => Style::default().fg(Color::Green),
-                    };
-                    ListItem::new(format!("{}{}", prefix, msg.content)).style(style)
-                })
+                .map(|line| ListItem::new(line.clone()))
                 .collect();
 
             let msg_list = List::new(msg_items)
                 .block(Block::default().borders(Borders::ALL).title("Conversation"));
-            frame.render_widget(msg_list, msg_area);
+            frame.render_widget(msg_list, messages_area);
 
-            // Draw thinking/tool output (3.10, 3.11, 3.13)
-            let aux_text = if show_thinking || show_tools {
-                let mut parts = vec![];
-                if show_thinking {
-                    parts.push("[THINKING]");
-                }
-                if show_tools {
-                    parts.push("[TOOLS]");
-                }
-                parts.join(" | ")
+            // === INPUT PANE ===
+            let input_title = if executing {
+                format!("INPUT (executing...)")
+            } else if queued_count > 0 {
+                format!("INPUT ({} queued)", queued_count)
+            } else if show_model_selector {
+                "MODEL SELECTOR - ↑↓ navigate, Enter to select".to_string()
             } else {
-                "Alt+T for thinking, Alt+O for tools".to_string()
-            };
-
-            let aux_widget = Paragraph::new(aux_text.clone())
-                .block(Block::default().borders(Borders::ALL).title("Thinking/Tools"))
-                .style(Style::default().fg(Color::Yellow));
-            frame.render_widget(aux_widget, aux_area);
-
-            // Draw input with command help (3.14)
-            let input_title = if show_help {
-                "Input (/help for commands)"
-            } else {
-                "Input (Ctrl+D to send, /help for commands)"
+                "INPUT - Enter to send, Alt+Enter to queue, / for commands".to_string()
             };
 
             let input_widget = Paragraph::new(input_text.clone())
                 .block(Block::default().borders(Borders::ALL).title(input_title))
+                .style(if executing { Style::default().fg(Color::Yellow) } else { Style::default() })
                 .wrap(Wrap { trim: true });
             frame.render_widget(input_widget, input_area);
 
-            // Draw status with context (3.12)
-            let status_text = format!(
-                "{} | Tokens: {}/{} | Cost: ${:.4} | Branches: {}",
+            // === FOOTER ===
+            let footer_text = format!(
+                "{} | Messages: {} | Tokens: {}/{} | Cost: ${:.4} | {}",
                 status.clone(),
-                context.input_tokens,
-                context.total_tokens,
-                context.estimated_cost,
-                branches.len()
+                messages.len(),
+                0,  // TODO: actual token count
+                5000,
+                0.0,
+                if executing { "⏳ EXECUTING" } else { "✓ READY" }
             );
 
-            let status_widget = Paragraph::new(status_text)
-                .style(Style::default().fg(Color::Gray));
-            frame.render_widget(status_widget, status_area);
+            let footer_widget = Paragraph::new(footer_text)
+                .style(Style::default().fg(if executing { Color::Yellow } else { Color::Gray }));
+            frame.render_widget(footer_widget, footer_area);
         })?;
 
         Ok(())

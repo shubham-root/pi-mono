@@ -54,6 +54,7 @@ pub enum KeyCommand {
     CtrlP,
     CtrlQ,
     CtrlS,
+    CtrlT,
     CtrlU,
     CtrlV,
     CtrlW,
@@ -90,6 +91,9 @@ pub enum KeyCommand {
     AltY,
     AltZ,
 
+    // Special Alt combinations
+    AltEnter,
+
     // Shift combinations
     ShiftTab,
     ShiftEnter,
@@ -97,6 +101,7 @@ pub enum KeyCommand {
     ShiftEnd,
     ShiftPageUp,
     ShiftPageDown,
+    ShiftCtrlP,
 
     // Other
     Unknown,
@@ -137,6 +142,10 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
         (KeyCode::F(10), _) => KeyCommand::F10,
         (KeyCode::F(11), _) => KeyCommand::F11,
         (KeyCode::F(12), _) => KeyCommand::F12,
+        
+        // Special combinations (must come before general Char case)
+        (KeyCode::Enter, KeyModifiers::ALT) => KeyCommand::AltEnter,
+        (KeyCode::Char('p'), KeyModifiers::CONTROL | KeyModifiers::SHIFT) => KeyCommand::ShiftCtrlP,
 
         // Character keys
         (KeyCode::Char(c), KeyModifiers::NONE) => KeyCommand::Char(c),
@@ -155,6 +164,7 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
         (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyCommand::CtrlP,
         (KeyCode::Char('q'), KeyModifiers::CONTROL) => KeyCommand::CtrlQ,
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => KeyCommand::CtrlS,
+        (KeyCode::Char('t'), KeyModifiers::CONTROL) => KeyCommand::CtrlT,
         (KeyCode::Char('u'), KeyModifiers::CONTROL) => KeyCommand::CtrlU,
         (KeyCode::Char('v'), KeyModifiers::CONTROL) => KeyCommand::CtrlV,
         (KeyCode::Char('w'), KeyModifiers::CONTROL) => KeyCommand::CtrlW,
