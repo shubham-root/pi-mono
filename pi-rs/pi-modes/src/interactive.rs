@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use pi_core::Agent;
-use pi_tui::{input::KeyCommand, tui::AppEvent, EventLoop};
+use pi_tui::{input::KeyCommand, EventLoop};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap, List, ListItem};
 use std::time::Duration;
@@ -39,6 +39,7 @@ struct BranchPoint {
 
 pub struct InteractiveMode {
     event_loop: EventLoop,
+    agent: Option<Agent>,
     messages: Vec<ConversationMessage>,
     input_text: String,
     status: String,
@@ -72,14 +73,14 @@ pub struct InteractiveMode {
 
 impl InteractiveMode {
     pub fn new(agent: Agent) -> Result<Self> {
-        let mut event_loop = EventLoop::new()?;
-        event_loop.set_agent(agent);
+        let event_loop = EventLoop::new()?;
 
         Ok(Self {
             event_loop,
+            agent: Some(agent),
             messages: Vec::new(),
             input_text: String::new(),
-            status: "Welcome to pi interactive mode".to_string(),
+            status: "Welcome to pi interactive mode. Type /help for commands.".to_string(),
             running: true,
             executing: false,
             
@@ -108,15 +109,22 @@ impl InteractiveMode {
     async fn run_loop(&mut self) -> Result<()> {
         loop {
             // Poll for events
-            let should_continue = if let Some(event) = self.event_loop.poll_event(Duration::from_millis(50)) {
-                self.handle_event(event).await?
-            } else {
-                true
-            };
+            if let Some(event) = self.event_loop.poll_event(Duration::from_millis(50)) {
+                use pi_tui::tui::AppEvent;
+                
+                let should_continue = match event {
+                    AppEvent::Key(cmd) => self.handle_key_command(cmd).await?,
+                    AppEvent::Resize(w, h) => {
+                        self.status = format!("Terminal resized: {}x{}", w, h);
+                        true
+                    }
+                    _ => true,
+                };
 
-            if !should_continue {
-                self.running = false;
-                break;
+                if !should_continue {
+                    self.running = false;
+                    break;
+                }
             }
 
             // Redraw UI
@@ -128,23 +136,6 @@ impl InteractiveMode {
         }
 
         Ok(())
-    }
-
-    async fn handle_event(&mut self, event: AppEvent) -> Result<bool> {
-        match event {
-            AppEvent::Key(cmd) => self.handle_key_command(cmd).await,
-            AppEvent::AgentMessage(msg) => {
-                self.messages.push(ConversationMessage {
-                    role: "assistant".to_string(),
-                    content: msg,
-                    thinking: None,
-                    tool_output: None,
-                });
-                self.executing = false;
-                Ok(true)
-            }
-            _ => Ok(true),
-        }
     }
 
     async fn handle_key_command(&mut self, cmd: KeyCommand) -> Result<bool> {
@@ -167,7 +158,7 @@ impl InteractiveMode {
             // Regular text input
             KeyCommand::Char(c) => {
                 self.input_text.push(c);
-                self.status = format!("Type / for commands. Ctrl+D to send, Ctrl+C to cancel, Ctrl+Q to exit (save={}).", self.save_on_exit);
+                self.status = format!("Type / for commands. Ctrl+D to send, Ctrl+C to cancel, Ctrl+Q to exit.");
                 Ok(true)
             }
 
@@ -197,13 +188,37 @@ impl InteractiveMode {
                     if msg_text.starts_with('/') {
                         self.handle_slash_command(&msg_text).await?;
                     } else {
+                        // Add user message to conversation
                         self.messages.push(ConversationMessage {
                             role: "user".to_string(),
-                            content: msg_text,
+                            content: msg_text.clone(),
                             thinking: None,
                             tool_output: None,
                         });
-                        self.executing = true;
+                        
+                        // Execute agent if available (AGENT INTEGRATION!)
+                        if let Some(ref mut agent) = self.agent {
+                            self.executing = true;
+                            self.status = "Executing...".to_string();
+                            
+                            match agent.prompt(&msg_text).await {
+                                Ok(response) => {
+                                    self.messages.push(ConversationMessage {
+                                        role: "assistant".to_string(),
+                                        content: response,
+                                        thinking: None,
+                                        tool_output: None,
+                                    });
+                                    self.status = "Ready".to_string();
+                                }
+                                Err(e) => {
+                                    self.status = format!("Error: {}", e);
+                                }
+                            }
+                            self.executing = false;
+                        } else {
+                            self.status = "No API key configured. Type commands only.".to_string();
+                        }
                     }
                     
                     self.input_text.clear();
@@ -222,15 +237,15 @@ impl InteractiveMode {
 
             // Arrow keys for editing
             KeyCommand::ArrowUp => {
-                // Previous in history
+                // Previous in history (future)
                 Ok(true)
             }
             KeyCommand::ArrowDown => {
-                // Next in history
+                // Next in history (future)
                 Ok(true)
             }
             KeyCommand::ArrowLeft | KeyCommand::ArrowRight => {
-                // Move cursor
+                // Move cursor (future)
                 Ok(true)
             }
 
@@ -309,6 +324,7 @@ impl InteractiveMode {
                 self.messages.clear();
                 self.input_text.clear();
                 self.branch_points.clear();
+                self.context = ContextStatus::default();
                 self.status = "New session started".to_string();
             }
             Some("/load") => {
@@ -354,11 +370,11 @@ impl InteractiveMode {
         self.event_loop.terminal().draw(|frame| {
             let size = frame.size();
 
-            // Split into: messages (70%), thinking/tools (15%), input (10%), status (5%)
+            // Split into: messages (65%), thinking/tools (15%), input (10%), status (10%)
             let msg_height = (size.height as f32 * 0.65) as u16;
-            let auxheight = (size.height as f32 * 0.15) as u16;
+            let aux_height = (size.height as f32 * 0.15) as u16;
             let input_height = (size.height as f32 * 0.1) as u16;
-            let status_height = size.height - msg_height - auxheight - input_height;
+            let status_height = size.height - msg_height - aux_height - input_height;
 
             // Message area
             let msg_area = Rect {
@@ -373,13 +389,13 @@ impl InteractiveMode {
                 x: 0,
                 y: msg_height,
                 width: size.width,
-                height: auxheight,
+                height: aux_height,
             };
 
             // Input area
             let input_area = Rect {
                 x: 0,
-                y: msg_height + auxheight,
+                y: msg_height + aux_height,
                 width: size.width,
                 height: input_height,
             };
@@ -387,7 +403,7 @@ impl InteractiveMode {
             // Status area (3.12: Context status)
             let status_area = Rect {
                 x: 0,
-                y: msg_height + auxheight + input_height,
+                y: msg_height + aux_height + input_height,
                 width: size.width,
                 height: status_height,
             };
@@ -416,11 +432,11 @@ impl InteractiveMode {
             // Draw thinking/tool output (3.10, 3.11, 3.13)
             let aux_text = if show_thinking || show_tools {
                 let mut parts = vec![];
-                if show_thinking && !show_thinking {
-                    parts.push("[THINKING CONTENT]");
+                if show_thinking {
+                    parts.push("[THINKING]");
                 }
-                if show_tools && !show_tools {
-                    parts.push("[TOOL OUTPUT]");
+                if show_tools {
+                    parts.push("[TOOLS]");
                 }
                 parts.join(" | ")
             } else {
