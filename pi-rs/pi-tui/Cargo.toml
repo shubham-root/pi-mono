@@ -1,0 +1,48 @@
+[package]
+name = "pi-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for pi-rs"
+license = "MIT"
+
+[dependencies]
+# Workspace
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+# pi crates
+pi-core = { path = "../pi-core" }
+pi-ai = { path = "../pi-ai" }
+pi-tools = { path = "../pi-tools" }
+
+# Terminal handling
+crossterm = "0.28"
+termion = "4.0"  # Alternative for some platforms
+ratatui = { version = "0.27", default-features = false, features = ["crossterm", "serde"] }
+
+# Text layout and rendering
+unicode-width = "0.2"
+unicode-segmentation = "1.12"
+strum = { version = "0.26", features = ["derive"] }
+
+# Markdown rendering
+pulldown-cmark = "0.12"
+syntect = "5.2"  # Syntax highlighting
+
+# Image support
+image = "0.25"
+
+# Clipboard
+arboard = "3.4"
+
+# Tokio utilities
+tokio-util = "0.7"
+
+[dev-dependencies]
+tempfile = "3.10"
+crossterm = { version = "0.28", features = ["serde"] }
