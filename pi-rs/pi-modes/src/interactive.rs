@@ -469,11 +469,21 @@ impl InteractiveMode {
                 self.status = "Enter: send | Alt+Enter: queue | Escape: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+O: tools | Ctrl+C: quit".to_string();
             }
             Some("/model") => {
-                self.show_model_selector = true;
-                self.status = "Model selector - use ↑↓ to navigate, Enter to select".to_string();
+                // Show available models grouped by provider
+                self.status = "[Anthropic] claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5 | [OpenAI] gpt-4o, gpt-4-turbo, gpt-3.5-turbo | [Google] gemini-2-pro, gemini-2-flash | [Bedrock] claude-opus-bedrock, nova-pro".to_string();
             }
             Some("/settings") => {
-                self.status = "Settings editor - not yet wired".to_string();
+                // Show available settings
+                let settings_list = vec![
+                    "defaultThinkingLevel: medium (off|minimal|low|medium|high|xhigh)",
+                    "theme: auto (dark|light|auto)",
+                    "hideThinkingBlock: false (true|false)",
+                    "steeringMode: one-at-a-time (all|one-at-a-time)",
+                    "followUpMode: one-at-a-time (all|one-at-a-time)",
+                    "transport: auto (sse|websocket|auto)",
+                    "doubleEscapeAction: tree (fork|tree|none)",
+                ];
+                self.status = format!("Settings (use /settings name=value): {}", settings_list.join(" | "));
             }
             Some("/login") => {
                 self.status = "Login dialog - not yet wired".to_string();
