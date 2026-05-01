@@ -1,0 +1,51 @@
+[package]
+name = "pi-core"
+version = "0.1.0"
+edition = "2024"
+description = "Core agent state, settings, model registry, and session management"
+license = "MIT"
+
+[dependencies]
+# Workspace
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# pi-ai
+pi-ai = { path = "../pi-ai" }
+
+# pi-tools
+pi-tools = { path = "../pi-tools" }
+
+# Tokio utilities
+tokio-util = "0.7"
+tokio-stream = "0.1"
+
+# Path handling
+dirs = "6.0"
+home = "0.5"
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "v7"] }
+
+# Time and date handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# TOML configuration
+toml = "0.8"
+
+# Prometheus-style metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+[dev-dependencies]
+tempfile = "3.10"
+tokio-test = "0.4"
+
+# fs operations for tests
+tokio = { workspace = true, features = ["full"] }
