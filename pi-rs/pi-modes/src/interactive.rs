@@ -1557,14 +1557,8 @@ impl InteractiveMode {
         let messages = self.messages.clone();
         let input_lines = self.editor.visual_lines();
         let (cursor_row, cursor_col) = self.editor.cursor_line_col();
-        // If a selection is active, compute the (row, col) span so the
-        // renderer can highlight the range with a background tint.
-        let selection_span = self.editor.selection_range().map(|(start, end)| {
-            let text = self.editor.text();
-            let (sr, sc) = byte_to_row_col(text, start);
-            let (er, ec) = byte_to_row_col(text, end);
-            ((sr, sc), (er, ec))
-        });
+        let editor_text = self.editor.text().to_string();
+        let selection_byte_range = self.editor.selection_range();
         let status_text = self.status.clone();
         let queued_count = self.queued_messages.len();
         let executing = self.executing;
@@ -1637,33 +1631,55 @@ impl InteractiveMode {
             let hint_row = size.height - 3;          // key hints + status
 
             // -------- Input textbox (bracketed by horizontal rules) --------
-            // Max 7 editor rows; beyond that the viewport scrolls so the
-            // cursor stays in view. The lower rule is fixed; the upper
-            // rule floats up as the user types.
-            let total_editor_rows = input_lines.len() as u16;
-            let editor_height: u16 = total_editor_rows.clamp(1, 7);
+            // Max 7 *visual* rows; beyond that the viewport scrolls so
+            // the cursor stays in view. We hard-wrap long logical lines
+            // against the available terminal width so text never runs
+            // past the right edge, and the cursor position tracks into
+            // the wrapped row.
+            //
+            // `content_width` is the column budget for text; 2 chars are
+            // reserved on the left for the `▌ ` prompt / 2-space
+            // continuation padding.
+            let content_width = (size.width as usize).saturating_sub(2).max(1);
+            let visuals = wrap_visual_lines(&input_lines, content_width);
+            let total_visual_rows = visuals.len().max(1) as u16;
+            let editor_height: u16 = total_visual_rows.clamp(1, 7);
             let lower_rule_row = hint_row.saturating_sub(1);
             let editor_top = lower_rule_row.saturating_sub(editor_height);
             let upper_rule_row = editor_top.saturating_sub(1);
             let last_call_row = upper_rule_row.saturating_sub(1);
 
-            // Compute which slice of input_lines is visible given the
-            // 7-row viewport. Bottom-anchor (so typing stays in view) and
-            // nudge up when the cursor has moved above the viewport.
-            let (first_visible_row, editor_lines_src): (usize, Vec<String>) =
-                if (total_editor_rows as usize) <= editor_height as usize {
-                    (0, input_lines.clone())
+            // Cursor position mapped into visual coordinates.
+            let (cursor_vrow, cursor_vcol) =
+                logical_to_visual(&visuals, cursor_row, cursor_col);
+
+            // Selection span mapped into visual coordinates (if any).
+            let selection_visual: Option<((usize, usize), (usize, usize))> =
+                selection_byte_range.map(|(start, end)| {
+                    let (sr, sc) = byte_to_row_col(&editor_text, start);
+                    let (er, ec) = byte_to_row_col(&editor_text, end);
+                    let s_vis = logical_to_visual(&visuals, sr, sc);
+                    let e_vis = logical_to_visual(&visuals, er, ec);
+                    (s_vis, e_vis)
+                });
+
+            // Bottom-anchor the viewport and shift up if the cursor would
+            // fall outside it.
+            let (first_visible_vrow, visible_slice): (usize, Vec<VisualLine>) =
+                if visuals.len() <= editor_height as usize {
+                    (0, visuals.clone())
                 } else {
-                    let max_first =
-                        (total_editor_rows as usize).saturating_sub(editor_height as usize);
+                    let max_first = visuals.len().saturating_sub(editor_height as usize);
                     let mut first = max_first;
-                    if cursor_row < first {
-                        first = cursor_row;
+                    if cursor_vrow < first {
+                        first = cursor_vrow;
+                    } else if cursor_vrow >= first + editor_height as usize {
+                        first = cursor_vrow + 1 - editor_height as usize;
                     }
-                    let slice = input_lines[first..first + editor_height as usize].to_vec();
+                    let slice = visuals[first..first + editor_height as usize].to_vec();
                     (first, slice)
                 };
-            let local_cursor_row = cursor_row.saturating_sub(first_visible_row);
+            let local_cursor_vrow = cursor_vrow.saturating_sub(first_visible_vrow);
 
             // -------- Overlay area (command palette / model list / ...) --------
             let overlay_max_h = (size.height as f32 * 0.55) as u16;
@@ -1771,15 +1787,19 @@ impl InteractiveMode {
                 width: size.width,
                 height: editor_height,
             };
-            let editor_lines_rendered: Vec<Line> = editor_lines_src
+            let editor_lines_rendered: Vec<Line> = visible_slice
                 .iter()
                 .enumerate()
-                .map(|(vi, line)| {
-                    // `vi` is the viewport row; `gi` is the global line
-                    // index into `input_lines`. Cursor / selection / first-row
-                    // decorations all reason in global coordinates.
-                    let gi = vi + first_visible_row;
-                    let prompt = if gi == 0 {
+                .map(|(local_vi, vline)| {
+                    // `local_vi` is the viewport row; `vrow` is the
+                    // global visual row index (across the wrapped
+                    // document). Cursor / selection highlighting works
+                    // in visual coordinates.
+                    let vrow = local_vi + first_visible_vrow;
+                    // First visual row of the logical line 0 gets the
+                    // ▌ prompt; everything else (including wrapped
+                    // continuation rows) gets 2-space padding.
+                    let prompt = if vline.logical_row == 0 && vline.logical_col_start == 0 {
                         if executing {
                             Span::styled("▌ ", Style::default().fg(Color::Yellow))
                         } else {
@@ -1788,24 +1808,23 @@ impl InteractiveMode {
                     } else {
                         Span::styled("  ", Style::default())
                     };
-                    // Per-row selection span (col start..end on this row).
+                    let line_char_count = vline.text.chars().count();
+                    // Selection span (visual-col start..end on this row).
                     let row_selection: Option<(usize, usize)> =
-                        selection_span.and_then(|((sr, sc), (er, ec))| {
-                            if gi < sr || gi > er {
+                        selection_visual.and_then(|((sr, sc), (er, ec))| {
+                            if vrow < sr || vrow > er {
                                 return None;
                             }
-                            let start_col = if gi == sr { sc } else { 0 };
-                            let end_col = if gi == er { ec } else { line.chars().count() };
+                            let start_col = if vrow == sr { sc } else { 0 };
+                            let end_col = if vrow == er { ec } else { line_char_count };
                             if end_col <= start_col {
                                 None
                             } else {
                                 Some((start_col, end_col))
                             }
                         });
-                    let cursor_here = vi == local_cursor_row && !overlay_active;
+                    let cursor_here = vrow == cursor_vrow && !overlay_active;
                     let mut spans: Vec<Span<'static>> = vec![prompt];
-                    // Walk the characters once so selection, cursor, and
-                    // body all compose into a single line output.
                     let mut col_idx = 0usize;
                     let mut buf = String::new();
                     let mut buf_style = Style::default();
@@ -1818,11 +1837,11 @@ impl InteractiveMode {
                             spans.push(Span::styled(std::mem::take(buf), style));
                         }
                     };
-                    for ch in line.chars() {
+                    for ch in vline.text.chars() {
                         let in_sel = row_selection
                             .map(|(s, e)| col_idx >= s && col_idx < e)
                             .unwrap_or(false);
-                        let at_cursor = cursor_here && col_idx == cursor_col;
+                        let at_cursor = cursor_here && col_idx == cursor_vcol;
                         let desired = if at_cursor {
                             cursor_style
                         } else if in_sel {
@@ -1838,17 +1857,20 @@ impl InteractiveMode {
                         col_idx += 1;
                     }
                     flush(&mut spans, &mut buf, buf_style);
-                    // Trailing cursor cell (cursor past last char).
-                    if cursor_here && col_idx == cursor_col {
+                    // Trailing cursor cell when the cursor sits past the
+                    // last char on this visual row.
+                    if cursor_here && col_idx == cursor_vcol {
                         spans.push(Span::styled(" ".to_string(), cursor_style));
                     }
-                    // Trailing selection cell when the selection extends
-                    // past the end of a soft-wrapped line onto the next
-                    // row; nothing extra needed if we're simply at end.
+                    let _ = local_vi;
                     Line::from(spans)
                 })
                 .collect();
-            let editor = Paragraph::new(editor_lines_rendered).wrap(Wrap { trim: false });
+            // We've already hard-wrapped the content to `content_width`,
+            // so tell ratatui *not* to soft-wrap again (which would add a
+            // second wrap at the Paragraph's own width and break the
+            // cursor math). Each rendered line is pre-sized.
+            let editor = Paragraph::new(editor_lines_rendered);
             frame.render_widget(editor, editor_area);
 
             // ===== Last-call stats row (dim grey, above upper boundary) =====
@@ -3243,6 +3265,91 @@ fn render_last_call_line(stats: &LastCallStats) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A hard-wrapped view of one piece of a logical editor line. Used by
+/// the draw routine to show long inputs without running them past the
+/// right edge of the textbox.
+#[derive(Clone, Debug)]
+struct VisualLine {
+    /// Logical line index (into `input_lines`).
+    logical_row: usize,
+    /// Char column in the logical line where this chunk starts.
+    logical_col_start: usize,
+    /// The chunk text (<= `content_width` chars).
+    text: String,
+}
+
+/// Hard-wrap each logical line into at most `content_width`-char
+/// chunks. Preserves empty logical lines (so a trailing `\n` still
+/// reserves a blank visual row). When `content_width` is 0 the input
+/// is returned as-is to avoid a divide-by-zero loop.
+fn wrap_visual_lines(lines: &[String], content_width: usize) -> Vec<VisualLine> {
+    let mut out: Vec<VisualLine> = Vec::new();
+    if content_width == 0 {
+        for (row, line) in lines.iter().enumerate() {
+            out.push(VisualLine {
+                logical_row: row,
+                logical_col_start: 0,
+                text: line.clone(),
+            });
+        }
+        return out;
+    }
+    for (row, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            out.push(VisualLine {
+                logical_row: row,
+                logical_col_start: 0,
+                text: String::new(),
+            });
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut start = 0usize;
+        while start < chars.len() {
+            let end = (start + content_width).min(chars.len());
+            let chunk: String = chars[start..end].iter().collect();
+            out.push(VisualLine {
+                logical_row: row,
+                logical_col_start: start,
+                text: chunk,
+            });
+            start = end;
+        }
+    }
+    out
+}
+
+/// Map a (logical_row, char-col) pair to a (visual_row, visual_col)
+/// pair given the wrapped view. If the cursor sits exactly at the
+/// wrap boundary (col == content_width of its row), it's reported at
+/// the *start* of the next visual row, matching how the text rolls
+/// over when the user types past the boundary.
+fn logical_to_visual(
+    visuals: &[VisualLine],
+    logical_row: usize,
+    logical_col: usize,
+) -> (usize, usize) {
+    let mut last_for_row: Option<(usize, &VisualLine)> = None;
+    for (vi, vl) in visuals.iter().enumerate() {
+        if vl.logical_row != logical_row {
+            continue;
+        }
+        let chunk_len = vl.text.chars().count();
+        let chunk_start = vl.logical_col_start;
+        let chunk_end_exclusive = chunk_start + chunk_len;
+        if logical_col >= chunk_start && logical_col < chunk_end_exclusive {
+            return (vi, logical_col - chunk_start);
+        }
+        last_for_row = Some((vi, vl));
+    }
+    if let Some((vi, vl)) = last_for_row {
+        let chunk_len = vl.text.chars().count();
+        let col = logical_col.saturating_sub(vl.logical_col_start).min(chunk_len);
+        return (vi, col);
+    }
+    (0, 0)
+}
+
 /// Convert a byte offset into a `(row, char-column)` pair using the
 /// same row/col semantics as `InputEditor::cursor_line_col`. Used by
 /// the selection renderer to paint the highlighted range row by row.
@@ -3458,5 +3565,45 @@ mod tests {
         assert_eq!(format_int_indian(1_00_000), "1,00,000");
         assert_eq!(format_int_indian(12_162_440), "1,21,62,440");
         assert_eq!(format_int_indian(1_25_11_376), "1,25,11,376");
+    }
+
+    #[test]
+    fn wrap_visual_lines_splits_at_content_width() {
+        let lines = vec!["hello world foo bar baz".to_string()];
+        let out = wrap_visual_lines(&lines, 10);
+        let texts: Vec<&str> = out.iter().map(|v| v.text.as_str()).collect();
+        assert_eq!(texts, vec!["hello worl", "d foo bar ", "baz"]);
+        assert!(out.iter().all(|v| v.logical_row == 0));
+        assert_eq!(out[0].logical_col_start, 0);
+        assert_eq!(out[1].logical_col_start, 10);
+        assert_eq!(out[2].logical_col_start, 20);
+    }
+
+    #[test]
+    fn wrap_preserves_empty_lines_and_row_indices() {
+        let lines = vec![
+            "a".to_string(),
+            String::new(),
+            "bbbbbbbbb".to_string(),
+        ];
+        let out = wrap_visual_lines(&lines, 4);
+        let rows: Vec<usize> = out.iter().map(|v| v.logical_row).collect();
+        // `a` -> 1 row, empty -> 1 row, `bbbbbbbbb` -> 3 rows (4 + 4 + 1).
+        assert_eq!(rows, vec![0, 1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn logical_to_visual_wraps_across_chunks() {
+        let lines = vec!["abcdefghij".to_string()]; // 10 chars
+        let visuals = wrap_visual_lines(&lines, 4);
+        // chunks: "abcd" (0..4), "efgh" (4..8), "ij" (8..10)
+        assert_eq!(logical_to_visual(&visuals, 0, 0), (0, 0));
+        assert_eq!(logical_to_visual(&visuals, 0, 3), (0, 3));
+        // Col == 4 falls through first chunk (exclusive end) so reports
+        // at the start of the second chunk.
+        assert_eq!(logical_to_visual(&visuals, 0, 4), (1, 0));
+        assert_eq!(logical_to_visual(&visuals, 0, 7), (1, 3));
+        assert_eq!(logical_to_visual(&visuals, 0, 8), (2, 0));
+        assert_eq!(logical_to_visual(&visuals, 0, 10), (2, 2));
     }
 }
