@@ -283,6 +283,13 @@ pub struct InteractiveMode {
     thinking_options: Vec<&'static str>,
     thinking_selected: usize,
 
+    // Editor autocomplete (`@path` / `!bash`)
+    autocomplete_active: bool,
+    autocomplete_kind: Option<crate::autocomplete::TriggerKind>,
+    autocomplete_fragment_start: usize,
+    autocomplete_items: Vec<crate::autocomplete::Suggestion>,
+    autocomplete_selected: usize,
+
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
 
@@ -346,6 +353,11 @@ impl InteractiveMode {
             tree_selected: 0,
             thinking_options: vec!["off", "low", "medium", "high"],
             thinking_selected: 0,
+            autocomplete_active: false,
+            autocomplete_kind: None,
+            autocomplete_fragment_start: 0,
+            autocomplete_items: Vec::new(),
+            autocomplete_selected: 0,
             sessions_dir: default_sessions_dir(),
             last_escape_time: None,
             ctrl_c_count: 0,
@@ -613,6 +625,15 @@ impl InteractiveMode {
     }
 
     async fn handle_key(&mut self, cmd: KeyCommand) -> Result<bool> {
+        let result = self.handle_key_inner(cmd).await?;
+        // Any key that could mutate the editor text might invalidate
+        // the autocomplete dropdown. Recompute after every key so the
+        // suggestions always track the active fragment.
+        self.refresh_autocomplete();
+        Ok(result)
+    }
+
+    async fn handle_key_inner(&mut self, cmd: KeyCommand) -> Result<bool> {
         match cmd {
             // ENTER: select from palette, select model/setting, or send message
             KeyCommand::Enter => {
@@ -781,6 +802,11 @@ impl InteractiveMode {
             // Escape: cancel or go back
             KeyCommand::Escape => {
                 self.ctrl_c_count = 0;
+                if self.autocomplete_active {
+                    self.autocomplete_active = false;
+                    self.autocomplete_items.clear();
+                    return Ok(true);
+                }
                 if self.palette_active {
                     self.close_palette();
                     self.editor.clear();
@@ -876,7 +902,9 @@ impl InteractiveMode {
 
             // Arrow Up: navigate palette/lists
             KeyCommand::ArrowUp => {
-                if self.palette_active && !self.palette_items.is_empty() {
+                if self.autocomplete_active {
+                    self.autocomplete_selected = self.autocomplete_selected.saturating_sub(1);
+                } else if self.palette_active && !self.palette_items.is_empty() {
                     self.palette_selected = self.palette_selected.saturating_sub(1);
                 } else if self.display_mode == DisplayMode::ModelList {
                     self.model_selected = self.model_selected.saturating_sub(1);
@@ -894,7 +922,11 @@ impl InteractiveMode {
 
             // Arrow Down: navigate palette/lists
             KeyCommand::ArrowDown => {
-                if self.palette_active && !self.palette_items.is_empty() {
+                if self.autocomplete_active {
+                    if self.autocomplete_selected < self.autocomplete_items.len() - 1 {
+                        self.autocomplete_selected += 1;
+                    }
+                } else if self.palette_active && !self.palette_items.is_empty() {
                     if self.palette_selected < self.palette_items.len() - 1 {
                         self.palette_selected += 1;
                     }
@@ -924,6 +956,12 @@ impl InteractiveMode {
 
             // Tab: autocomplete command
             KeyCommand::Tab => {
+                // Editor autocomplete (file / bash) wins over the palette
+                // when a fragment is active.
+                if self.autocomplete_active {
+                    self.accept_autocomplete();
+                    return Ok(true);
+                }
                 if self.palette_active && !self.palette_items.is_empty() {
                     let cmd_name = self.palette_items[self.palette_selected].name.clone();
                     self.editor.clear();
@@ -1017,6 +1055,74 @@ impl InteractiveMode {
         self.palette_active = false;
         self.palette_items.clear();
         self.palette_selected = 0;
+    }
+
+    /// Rescan autocomplete suggestions based on the current editor
+    /// buffer. Called after every insertion / backspace / cursor
+    /// move that could change the active fragment.
+    fn refresh_autocomplete(&mut self) {
+        // Don't autocomplete while we're inside a modal overlay — the
+        // palette already owns the dropdown real-estate.
+        if self.palette_active || self.display_mode != DisplayMode::Chat {
+            self.autocomplete_active = false;
+            return;
+        }
+        let text = self.editor.text();
+        let cursor = self.editor.cursor_byte();
+        let Some((kind, start, fragment)) =
+            crate::autocomplete::detect_trigger(text, cursor)
+        else {
+            self.autocomplete_active = false;
+            self.autocomplete_items.clear();
+            return;
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let items = match kind {
+            crate::autocomplete::TriggerKind::File => {
+                crate::autocomplete::scan_file_completions(fragment, &cwd, 12)
+            }
+            crate::autocomplete::TriggerKind::Bash => {
+                crate::autocomplete::scan_bash_completions(fragment, 12)
+            }
+        };
+        if items.is_empty() {
+            self.autocomplete_active = false;
+            self.autocomplete_items.clear();
+            return;
+        }
+        self.autocomplete_active = true;
+        self.autocomplete_kind = Some(kind);
+        self.autocomplete_fragment_start = start;
+        self.autocomplete_items = items;
+        self.autocomplete_selected = 0;
+    }
+
+    /// Replace the current `@frag`/`!frag` in the editor with the
+    /// selected suggestion and close the dropdown.
+    fn accept_autocomplete(&mut self) {
+        if !self.autocomplete_active {
+            return;
+        }
+        let Some(sug) = self.autocomplete_items.get(self.autocomplete_selected).cloned()
+        else {
+            self.autocomplete_active = false;
+            return;
+        };
+        let start = self.autocomplete_fragment_start;
+        let cursor = self.editor.cursor_byte();
+        // Build the new text: text[..start] + sug.insert + text[cursor..].
+        let text = self.editor.text();
+        if start > cursor || cursor > text.len() {
+            self.autocomplete_active = false;
+            return;
+        }
+        let mut new_text = String::with_capacity(text.len() + sug.insert.len());
+        new_text.push_str(&text[..start]);
+        new_text.push_str(&sug.insert);
+        new_text.push_str(&text[cursor..]);
+        self.editor.set_text(new_text);
+        self.autocomplete_active = false;
+        self.autocomplete_items.clear();
     }
 
     async fn execute_command(&mut self, name: &str) -> Result<()> {
@@ -1284,6 +1390,10 @@ impl InteractiveMode {
         let thinking_options = self.thinking_options.clone();
         let thinking_selected = self.thinking_selected;
         let thinking_level = self.agent.as_ref().and_then(|a| a.thinking_level());
+        let autocomplete_active = self.autocomplete_active;
+        let autocomplete_items = self.autocomplete_items.clone();
+        let autocomplete_selected = self.autocomplete_selected;
+        let autocomplete_kind = self.autocomplete_kind;
 
         // Footer inputs: pwd + branch on one line, token stats + model on
         // the next. These are resolved via the registry so they stay truthy
@@ -1336,6 +1446,7 @@ impl InteractiveMode {
             //          list / settings list). Takes up to ~60% of screen. --------
             let overlay_max_h = (size.height as f32 * 0.55) as u16;
             let overlay_active = palette_active
+                || autocomplete_active
                 || display_mode == DisplayMode::ModelList
                 || display_mode == DisplayMode::SettingsList
                 || display_mode == DisplayMode::LoginList
@@ -1351,6 +1462,7 @@ impl InteractiveMode {
                     DisplayMode::TreeView => (tree_rows.len() as u16 + 3).min(overlay_max_h),
                     DisplayMode::ThinkingList => (thinking_options.len() as u16 + 3).min(overlay_max_h),
                     _ if palette_active => (palette_items.len() as u16 + 3).min(overlay_max_h),
+                    _ if autocomplete_active => (autocomplete_items.len() as u16 + 2).min(overlay_max_h),
                     _ => 0,
                 }
             } else {
@@ -1417,6 +1529,12 @@ impl InteractiveMode {
                     render_tree(&tree_rows, tree_selected)
                 } else if display_mode == DisplayMode::ThinkingList {
                     render_thinking_list(&thinking_options, thinking_selected, thinking_level)
+                } else if autocomplete_active {
+                    render_autocomplete_dropdown(
+                        autocomplete_kind,
+                        &autocomplete_items,
+                        autocomplete_selected,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -1917,6 +2035,36 @@ fn render_hint_line_settings_list() -> Line<'static> {
         Span::styled("esc".to_string(), Style::default().fg(Color::Yellow)),
         Span::raw(" cancel"),
     ])
+}
+
+fn render_autocomplete_dropdown(
+    kind: Option<crate::autocomplete::TriggerKind>,
+    items: &[crate::autocomplete::Suggestion],
+    selected: usize,
+) -> Vec<Line<'static>> {
+    let title = match kind {
+        Some(crate::autocomplete::TriggerKind::File) => format!("Files ({})", items.len()),
+        Some(crate::autocomplete::TriggerKind::Bash) => format!("Commands ({})", items.len()),
+        None => format!("Suggestions ({})", items.len()),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        title,
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    for (i, s) in items.iter().enumerate() {
+        let is_sel = i == selected;
+        let prefix = if is_sel { "› " } else { "  " };
+        let style = if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(s.label.clone(), style),
+        ]));
+    }
+    lines
 }
 
 fn render_palette(items: &[SlashCommand], selected: usize) -> Vec<Line<'static>> {
