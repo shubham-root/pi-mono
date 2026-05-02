@@ -928,6 +928,21 @@ impl InteractiveMode {
                         self.status = status;
                         self.display_mode = DisplayMode::Chat;
                         self.model_filter.clear();
+
+                        // Persist as the new default so the next `pi`
+                        // session (without `--model`) picks this model
+                        // up automatically. Soft-fail — if the config
+                        // dir is unwritable we surface a note in the
+                        // status instead of blocking the switch.
+                        match persist_last_model(&qualified) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                self.status = format!(
+                                    "{} (could not persist default: {})",
+                                    self.status, e
+                                );
+                            }
+                        }
                     }
                 } else if self.display_mode == DisplayMode::SettingsList {
                     // Select setting
@@ -3020,6 +3035,17 @@ fn budget_hint_for_level(label: &str) -> &'static str {
         "high" => "~16k tokens",
         _ => "",
     }
+}
+
+/// Persist `model_id` as the user's current default by merging into
+/// `~/.config/pi/config.toml` via `pi_core::settings::Settings`. This
+/// is how pi remembers the last-used model across sessions — the CLI
+/// reads this on startup when `--model` is not supplied.
+fn persist_last_model(model_id: &str) -> Result<()> {
+    let mut settings = pi_core::settings::Settings::load_global().unwrap_or_default();
+    settings.model = Some(model_id.to_string());
+    settings.save_global()?;
+    Ok(())
 }
 
 fn default_sessions_dir() -> PathBuf {

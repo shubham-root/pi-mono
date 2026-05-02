@@ -97,9 +97,31 @@ fn resolve_model_and_key(
         return (model_id, api_key);
     }
 
-    // 2. No --model: walk the priority list and pick the first provider
-    //    whose env key is configured. Always return a qualified id so the
-    //    agent knows exactly which provider to dispatch to.
+    // 2. No --model: consult saved settings first — pi remembers the
+    //    last-used model so users don't have to retype `--model` every
+    //    session. If the saved id is still in the registry and still has
+    //    auth configured, use it.
+    if let Ok(settings) = pi_core::settings::Settings::load_global() {
+        if let Some(saved) = settings.model.as_deref() {
+            let found = if let Some((pid, mid)) = saved.split_once('/') {
+                registry.find_by_provider(pid, mid)
+            } else {
+                registry.find_model(saved)
+            };
+            if let Some((provider, model)) = found {
+                if let Some((_, key)) = provider.resolve_env_key() {
+                    return (format!("{}/{}", provider.id, model.id), Some(key));
+                }
+                // Saved id exists but auth is gone; fall through to the
+                // priority list rather than insisting on it.
+            }
+        }
+    }
+
+    // 3. No saved model (or it's unusable): walk the priority list and
+    //    pick the first provider whose env key is configured. Always
+    //    return a qualified id so the agent knows exactly which
+    //    provider to dispatch to.
     for pid in DEFAULT_PROVIDER_PRIORITY {
         if let Some(provider) = registry.provider(pid) {
             if let Some((_, key)) = provider.resolve_env_key() {
