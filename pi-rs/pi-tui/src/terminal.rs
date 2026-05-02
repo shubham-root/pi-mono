@@ -3,9 +3,15 @@
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, MouseEvent},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyboardEnhancementFlags,
+        MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::prelude::*;
 use std::io::Stdout;
@@ -51,6 +57,19 @@ impl Terminal {
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        // Kitty keyboard protocol: lets us distinguish Shift+Enter from
+        // plain Enter, catch key *releases*, and disambiguate the
+        // classic Esc=Ctrl+[ overload. Querying first avoids errors on
+        // terminals that don't implement it.
+        if matches!(supports_keyboard_enhancement(), Ok(true)) {
+            let _ = execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+                )
+            );
+        }
 
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(backend)?;
@@ -132,6 +151,11 @@ impl Terminal {
     fn restore_terminal() -> Result<()> {
         disable_raw_mode()?;
         let mut stdout = std::io::stdout();
+        // Pop the keyboard-enhancement flags first so the terminal is
+        // left in whatever state the user's shell expects. The pop is
+        // a no-op on terminals that never received the push, so it's
+        // safe to unconditionally execute.
+        let _ = execute!(stdout, PopKeyboardEnhancementFlags);
         execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
         Ok(())
     }

@@ -1,7 +1,7 @@
 //! Input parser - convert terminal events to semantic key commands.
 //! Implements Phase 3.2 with support for Kitty keyboard protocol and fallback.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 /// Semantic key command
@@ -114,6 +114,12 @@ pub enum KeyCommand {
 
 /// Parse crossterm KeyEvent to semantic KeyCommand
 pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
+    // With the Kitty keyboard protocol enabled we start receiving
+    // `Release` and `Repeat` events; ignore releases so keys aren't
+    // processed twice, keep presses and repeats.
+    if matches!(event.kind, KeyEventKind::Release) {
+        return KeyCommand::Unknown;
+    }
     match (event.code, event.modifiers) {
         // Navigation
         (KeyCode::Up, KeyModifiers::NONE) => KeyCommand::ArrowUp,
