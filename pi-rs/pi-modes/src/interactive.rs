@@ -340,6 +340,14 @@ pub struct InteractiveMode {
     /// Clamped in the renderer against the total transcript height.
     messages_scroll: usize,
 
+    /// Cached model id for display purposes. Kept in sync any time we
+    /// know the agent's id; read by the footer even while
+    /// `self.agent` is `None` (i.e. while a turn is in flight with
+    /// the agent moved into the background task). Without this the
+    /// model column showed `(no model)` every time a turn was
+    /// executing.
+    active_model_id_cache: String,
+
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
 
@@ -465,6 +473,8 @@ impl InteractiveMode {
             }
         };
 
+        let initial_model = agent.model_id().to_string();
+
         Ok(Self {
             event_loop,
             agent: Some(agent),
@@ -502,6 +512,7 @@ impl InteractiveMode {
             autocomplete_items: Vec::new(),
             autocomplete_selected: 0,
             messages_scroll: 0,
+            active_model_id_cache: initial_model,
             sessions_dir: default_sessions_dir(),
             session_manager,
             current_session,
@@ -518,8 +529,12 @@ impl InteractiveMode {
 
     pub async fn run(&mut self) -> Result<()> {
         loop {
-            // Drain keyboard/terminal events first so the UI stays responsive.
-            if let Some(event) = self.event_loop.poll_event(Duration::from_millis(50)) {
+            // Drain keyboard/terminal events first so the UI stays
+            // responsive. 20ms poll gives ~50 redraws/sec, enough for
+            // smooth cursor blinking and token-streaming visibility
+            // without noticeable CPU impact (the loop is mostly idle
+            // in `poll_event` between events).
+            if let Some(event) = self.event_loop.poll_event(Duration::from_millis(20)) {
                 use pi_tui::tui::AppEvent;
                 let cont = match event {
                     AppEvent::Key(cmd) => self.handle_key(cmd).await?,
@@ -1040,6 +1055,14 @@ impl InteractiveMode {
                             format!("Selected {} (no agent initialized)", m.model_name)
                         };
 
+                        // Cache for the footer so the model column
+                        // survives mid-turn frames (agent is moved
+                        // into the task while executing). Update
+                        // regardless of whether `self.agent` was
+                        // `Some` — the UI should still reflect the
+                        // user's intent.
+                        self.active_model_id_cache = qualified.clone();
+
                         self.status = status;
                         self.display_mode = DisplayMode::Chat;
                         self.model_filter.clear();
@@ -1155,6 +1178,12 @@ impl InteractiveMode {
                                     // key resolve to the right place.
                                     let _ = agent.set_model(&session.metadata().model);
                                 }
+                                // Cache the session's model id so the
+                                // footer displays it even while a turn
+                                // is in flight (agent moved into the
+                                // background task).
+                                self.active_model_id_cache =
+                                    session.metadata().model.clone();
                                 self.messages = replay;
                                 self.messages_scroll = 0;
                                 self.usage = UsageStats::default();
@@ -2141,30 +2170,39 @@ impl InteractiveMode {
         // when /model swaps the active provider.
         let pwd = pwd_with_tilde();
         let git_branch = git_branch_for_pwd();
+        // Prefer the live agent's id when we own the handle; otherwise
+        // fall back to the cached id (populated on construction + any
+        // `/model` swap). Without the cache, mid-turn frames render
+        // `(no model)` because `spawn_prompt` moves the agent into the
+        // background task and `self.agent` is temporarily `None`.
         let active_model_label = self
             .agent
             .as_ref()
             .map(|a| a.model_id().to_string())
-            .unwrap_or_else(|| "(no model)".to_string());
+            .unwrap_or_else(|| self.active_model_id_cache.clone());
         let active_model_info = self
             .agent
             .as_ref()
-            .and_then(|a| active_model_summary(a.model_id()));
+            .map(|a| a.model_id().to_string())
+            .or_else(|| Some(self.active_model_id_cache.clone()))
+            .and_then(|id| active_model_summary(&id));
         let usage = self.usage.clone();
-        let context_window: Option<u32> = self
-            .agent
-            .as_ref()
-            .and_then(|a| {
-                let model_id = a.model_id();
-                let reg = pi_core::model_registry::ModelRegistry::global();
-                if let Some((pid, mid)) = model_id.split_once('/') {
-                    reg.find_by_provider(pid, mid).or_else(|| reg.find_model(model_id))
-                } else {
-                    reg.find_model(model_id)
-                }
-            })
-            .map(|(_, m)| m.context_window)
-            .filter(|w| *w > 0);
+        let context_window: Option<u32> = {
+            let model_id = self
+                .agent
+                .as_ref()
+                .map(|a| a.model_id().to_string())
+                .unwrap_or_else(|| self.active_model_id_cache.clone());
+            let reg = pi_core::model_registry::ModelRegistry::global();
+            let found = if let Some((pid, mid)) = model_id.split_once('/') {
+                reg.find_by_provider(pid, mid).or_else(|| reg.find_model(&model_id))
+            } else {
+                reg.find_model(&model_id)
+            };
+            found
+                .map(|(_, m)| m.context_window)
+                .filter(|w| *w > 0)
+        };
         let first_turn = messages.is_empty() && !palette_active && display_mode == DisplayMode::Chat;
 
         self.event_loop.terminal().draw(|frame| {
@@ -2850,12 +2888,42 @@ fn render_messages(
             for rendered in crate::markdown::render_markdown(&msg.content) {
                 lines.push(rendered);
             }
+            // Streaming indicator: for in-progress assistant turns,
+            // append a cursor glyph to the last rendered line so the
+            // user sees tokens arriving even when the provider
+            // batches its deltas (OpenRouter-proxied models often
+            // release in 1-second bursts rather than per-token).
+            // Blinks at ~2 Hz by toggling visibility based on the
+            // current clock.
+            if msg.streaming {
+                let blink_on = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+                    / 400)
+                    % 2
+                    == 0;
+                if let Some(last) = lines.last_mut() {
+                    let glyph = if blink_on { "▌" } else { " " };
+                    last.spans.push(Span::styled(
+                        glyph.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+            }
         } else if msg.streaming && msg.tool_calls.is_empty() {
             // Nothing visible yet but the turn is live. Show a pulsing
             // caret so the user sees the TUI hasn't frozen.
+            let blink_on = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+                / 400)
+                % 2
+                == 0;
             lines.push(Line::from(Span::styled(
-                "…".to_string(),
-                dim_style(),
+                if blink_on { "▌" } else { " " }.to_string(),
+                Style::default().fg(Color::Cyan),
             )));
         }
         lines.push(Line::from(""));
