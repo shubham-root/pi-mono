@@ -65,6 +65,8 @@ pub struct ModelRow {
     pub context_window: u32,
     pub reasoning: bool,
     pub env_configured: bool,
+    pub input_cost: f64,
+    pub output_cost: f64,
 }
 
 fn build_model_rows(registry: &ModelRegistry) -> Vec<ModelRow> {
@@ -72,6 +74,11 @@ fn build_model_rows(registry: &ModelRegistry) -> Vec<ModelRow> {
     for provider in registry.providers() {
         let env_configured = provider.resolve_env_key().is_some();
         for model in &provider.models {
+            let (input_cost, output_cost) = model
+                .cost
+                .as_ref()
+                .map(|c| (c.input, c.output))
+                .unwrap_or((0.0, 0.0));
             rows.push(ModelRow {
                 provider_id: provider.id.clone(),
                 provider_display: provider.display_name.clone(),
@@ -80,26 +87,85 @@ fn build_model_rows(registry: &ModelRegistry) -> Vec<ModelRow> {
                 context_window: model.context_window,
                 reasoning: model.reasoning,
                 env_configured,
+                input_cost,
+                output_cost,
             });
         }
     }
+    // Stable sort: configured providers first, then alphabetical by
+    // provider then model.
+    rows.sort_by(|a, b| {
+        b.env_configured
+            .cmp(&a.env_configured)
+            .then_with(|| a.provider_display.to_lowercase().cmp(&b.provider_display.to_lowercase()))
+            .then_with(|| a.model_name.to_lowercase().cmp(&b.model_name.to_lowercase()))
+    });
     rows
+}
+
+/// Subsequence match: does every character of `needle` appear in
+/// `haystack` in order (case-insensitive)? Returns an optional score
+/// (lower is better) for fuzzy ranking; `None` means no match.
+fn fuzzy_score(needle: &str, haystack: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let needle = needle.to_lowercase();
+    let haystack = haystack.to_lowercase();
+    let mut needle_iter = needle.chars().peekable();
+    let mut last_match: Option<usize> = None;
+    let mut score: usize = 0;
+    let mut first_match: Option<usize> = None;
+    for (i, c) in haystack.char_indices() {
+        if let Some(&needed) = needle_iter.peek() {
+            if c == needed {
+                if first_match.is_none() {
+                    first_match = Some(i);
+                }
+                if let Some(last) = last_match {
+                    // Penalize gaps between matched characters.
+                    score += i - last - 1;
+                }
+                last_match = Some(i);
+                needle_iter.next();
+            }
+        } else {
+            break;
+        }
+    }
+    if needle_iter.peek().is_some() {
+        None
+    } else {
+        // Weight the prefix position less heavily than the middle-match
+        // gaps so matches at the start of the string win ties.
+        Some(score + first_match.unwrap_or(0) / 2)
+    }
 }
 
 fn filter_model_rows(query: &str, all: &[ModelRow]) -> Vec<ModelRow> {
     if query.is_empty() {
         return all.to_vec();
     }
-    let q = query.to_lowercase();
-    all.iter()
-        .filter(|row| {
-            row.model_id.to_lowercase().contains(&q)
-                || row.model_name.to_lowercase().contains(&q)
-                || row.provider_id.to_lowercase().contains(&q)
-                || row.provider_display.to_lowercase().contains(&q)
-        })
-        .cloned()
-        .collect()
+    let q = query.trim();
+    let mut scored: Vec<(usize, ModelRow)> = Vec::new();
+    for row in all {
+        // Try each searchable field; keep the best (lowest) score.
+        let candidates = [
+            row.model_id.as_str(),
+            row.model_name.as_str(),
+            row.provider_id.as_str(),
+            row.provider_display.as_str(),
+        ];
+        let best = candidates
+            .iter()
+            .filter_map(|field| fuzzy_score(q, field))
+            .min();
+        if let Some(s) = best {
+            scored.push((s, row.clone()));
+        }
+    }
+    scored.sort_by(|a, b| a.0.cmp(&b.0));
+    scored.into_iter().map(|(_, r)| r).collect()
 }
 
 /// Setting info
@@ -1888,10 +1954,36 @@ fn render_model_list(
         ),
         Span::raw("   "),
         Span::styled(
-            if filter.is_empty() { String::new() } else { format!("filter: {filter}") },
+            if filter.is_empty() {
+                String::new()
+            } else {
+                format!("filter: {filter}")
+            },
             muted_style(),
         ),
     ])];
+    // Header row so the columns line up visually.
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<36}", "name"),
+            dim_style().add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::raw(" "),
+        Span::styled(format!("{:>6}", "ctx"), dim_style().add_modifier(Modifier::UNDERLINED)),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:>16}", "$/M in/out"),
+            dim_style().add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<3}", "rsn"),
+            dim_style().add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::raw("  "),
+        Span::styled("id", dim_style().add_modifier(Modifier::UNDERLINED)),
+    ]));
     let mut current_provider = String::new();
     for (i, m) in rows.iter().enumerate() {
         if m.provider_id != current_provider {
@@ -1915,16 +2007,36 @@ fn render_model_list(
             Style::default()
         };
         let ctx_w = format_context_window(m.context_window);
+        let cost_cell = if m.input_cost == 0.0 && m.output_cost == 0.0 {
+            "-".to_string()
+        } else {
+            format!("{:.2}/{:.2}", m.input_cost, m.output_cost)
+        };
+        let reasoning_cell = if m.reasoning { "yes" } else { "-" };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:<36}", m.model_name), name_style),
+            Span::styled(format!("{:<36}", truncate_for_col(&m.model_name, 36)), name_style),
             Span::raw(" "),
             Span::styled(format!("{ctx_w:>6}"), muted_style()),
+            Span::raw("  "),
+            Span::styled(format!("{cost_cell:>16}"), muted_style()),
+            Span::raw("  "),
+            Span::styled(format!("{reasoning_cell:<3}"), dim_style()),
             Span::raw("  "),
             Span::styled(m.model_id.clone(), dim_style()),
         ]));
     }
     lines
+}
+
+fn truncate_for_col(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn render_settings_list(rows: &[SettingInfo], selected: usize) -> Vec<Line<'static>> {
@@ -2491,5 +2603,48 @@ mod tests {
         let rendered = preview_tool_args(&long);
         assert!(rendered.ends_with("..."), "{rendered}");
         assert!(rendered.chars().count() <= 80);
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_contiguous_matches() {
+        let a = fuzzy_score("cld", "claude").unwrap();
+        let b = fuzzy_score("cld", "cerebras-llama-data").unwrap();
+        assert!(a < b, "claude {a} should score better than {b}");
+    }
+
+    #[test]
+    fn fuzzy_score_returns_none_for_missing_chars() {
+        assert!(fuzzy_score("xyz", "claude-haiku").is_none());
+    }
+
+    #[test]
+    fn filter_model_rows_orders_by_match_quality() {
+        let rows = vec![
+            ModelRow {
+                provider_id: "anthropic".into(),
+                provider_display: "Anthropic".into(),
+                model_id: "claude-opus-4".into(),
+                model_name: "Claude Opus 4".into(),
+                context_window: 200_000,
+                reasoning: true,
+                env_configured: true,
+                input_cost: 15.0,
+                output_cost: 75.0,
+            },
+            ModelRow {
+                provider_id: "google".into(),
+                provider_display: "Google".into(),
+                model_id: "gemini-pro-1.5".into(),
+                model_name: "Gemini Pro 1.5".into(),
+                context_window: 2_000_000,
+                reasoning: false,
+                env_configured: false,
+                input_cost: 0.0,
+                output_cost: 0.0,
+            },
+        ];
+        let filtered = filter_model_rows("claude", &rows);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].model_id, "claude-opus-4");
     }
 }
