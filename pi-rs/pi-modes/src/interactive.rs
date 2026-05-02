@@ -225,6 +225,9 @@ pub struct ConversationToolCall {
     pub id: String,
     pub name: String,
     pub input_preview: String,
+    /// Raw JSON input (retained so the renderer can extract structured
+    /// fields like `old_string`/`new_string` for edit diffs).
+    pub input_raw: Option<serde_json::Value>,
     /// `None` while the tool is running, `Some(output)` once it returns.
     pub output: Option<String>,
     pub is_error: bool,
@@ -373,6 +376,15 @@ impl InteractiveMode {
                 use pi_tui::tui::AppEvent;
                 let cont = match event {
                     AppEvent::Key(cmd) => self.handle_key(cmd).await?,
+                    AppEvent::Paste(text) => {
+                        // Strip a single trailing newline (common when
+                        // pasting a line from another terminal) so the
+                        // paste does not accidentally submit the turn.
+                        let trimmed = text.trim_end_matches('\n').to_string();
+                        self.editor.insert_str(&trimmed);
+                        self.refresh_autocomplete();
+                        true
+                    }
                     _ => true,
                 };
                 if !cont {
@@ -511,6 +523,7 @@ impl InteractiveMode {
                         id,
                         name,
                         input_preview: preview,
+                        input_raw: Some(input),
                         output: None,
                         is_error: false,
                     });
@@ -554,11 +567,31 @@ impl InteractiveMode {
                 // TextDelta already populated content.
             }
             AgentEvent::Error { message } => {
+                // Drop the streaming placeholder entirely and push a
+                // dedicated error row so the red-tinted visual kicks in.
                 if let Some(msg) = self.messages.get_mut(assistant_index) {
                     msg.streaming = false;
-                    if msg.content.is_empty() {
-                        msg.content = format!("(error) {message}");
+                    if msg.content.is_empty() && msg.tool_calls.is_empty() {
+                        // Swap the blank placeholder in-place so the
+                        // message index tracked by the active job stays
+                        // valid for any late-arriving events.
+                        msg.role = "error".to_string();
+                        msg.content = message.clone();
+                    } else {
+                        // There was partial output; keep it and append a
+                        // separate error row.
+                        self.messages.push(ConversationMessage {
+                            role: "error".to_string(),
+                            content: message.clone(),
+                            ..Default::default()
+                        });
                     }
+                } else {
+                    self.messages.push(ConversationMessage {
+                        role: "error".to_string(),
+                        content: message.clone(),
+                        ..Default::default()
+                    });
                 }
                 self.status = format!("Error: {message}");
             }
@@ -1799,6 +1832,32 @@ fn render_messages(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     for msg in messages {
+        if msg.role == "error" {
+            // Error rows get a dedicated red-tinted style so provider
+            // / tool failures are visually distinct from normal
+            // assistant output.
+            let bg = Style::default().bg(Color::Indexed(52));
+            let prefix_style = bg
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD);
+            for (i, text_line) in msg.content.lines().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(" error ".to_string(), prefix_style),
+                        Span::styled(" ".to_string(), bg),
+                        Span::styled(text_line.to_string(), bg.fg(Color::Red)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("       ".to_string(), bg),
+                        Span::styled(text_line.to_string(), bg.fg(Color::Red)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(""));
+            continue;
+        }
+
         if msg.role == "user" {
             // Match the TS user-message visual: cyan bold prefix, text in
             // the default color with a subtle › divider. A full-width
@@ -1870,6 +1929,15 @@ fn render_messages(
                 Span::styled(call.input_preview.clone(), bg.fg(Color::Gray)),
             ]);
             lines.push(header);
+            // Tool-specific structured preview (edit -> mini-diff, write
+            // -> content preview). Shown regardless of Ctrl+O because
+            // it's the main signal that the tool call will do something
+            // destructive.
+            if let Some(raw) = call.input_raw.as_ref() {
+                for extra in tool_structured_preview(&call.name, raw, bg) {
+                    lines.push(extra);
+                }
+            }
             if show_tools {
                 if let Some(output) = &call.output {
                     let preview_max_lines = 20usize;
@@ -2602,6 +2670,102 @@ fn save_transcript_json(messages: &[ConversationMessage], path: &Path, model: &s
 /// surface the most useful single field for the common tools (bash,
 /// read, write, edit, grep, find, ls) and fall back to a single-line
 /// JSON string otherwise.
+/// Render small, tool-specific preview lines below a tool-call
+/// header. Used for `edit` (mini unified-diff) and `write` (first few
+/// lines of content), returning an empty list for tools that don't
+/// benefit from a structured preview.
+fn tool_structured_preview(
+    name: &str,
+    input: &serde_json::Value,
+    bg: Style,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    match name {
+        "edit" => {
+            // Try the batched form first (`edits: [{oldText, newText}]`)
+            // and fall back to the flat form (`old_string`/`new_string`)
+            // used by some provider-side tool schemas.
+            let edits_list = input.get("edits").and_then(|v| v.as_array());
+            let (old_text, new_text): (String, String) = if let Some(arr) = edits_list {
+                let mut old_buf = String::new();
+                let mut new_buf = String::new();
+                for (i, e) in arr.iter().enumerate() {
+                    if i > 0 {
+                        old_buf.push_str("\n---\n");
+                        new_buf.push_str("\n---\n");
+                    }
+                    if let Some(o) = e.get("oldText").and_then(|v| v.as_str()) {
+                        old_buf.push_str(o);
+                    }
+                    if let Some(n) = e.get("newText").and_then(|v| v.as_str()) {
+                        new_buf.push_str(n);
+                    }
+                }
+                (old_buf, new_buf)
+            } else {
+                (
+                    input.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    input.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                )
+            };
+            if old_text.is_empty() && new_text.is_empty() {
+                return out;
+            }
+            let old_lines: Vec<&str> = old_text.split('\n').collect();
+            let new_lines: Vec<&str> = new_text.split('\n').collect();
+            let max_each = 5usize;
+            for (i, line) in old_lines.iter().take(max_each).enumerate() {
+                let marker = if i == 0 { "  − " } else { "    " };
+                out.push(Line::from(vec![
+                    Span::styled(marker.to_string(), bg.fg(Color::Red)),
+                    Span::styled((*line).to_string(), bg.fg(Color::Red)),
+                ]));
+            }
+            if old_lines.len() > max_each {
+                out.push(Line::from(Span::styled(
+                    format!("    … {} more removed line(s)", old_lines.len() - max_each),
+                    bg.fg(Color::DarkGray),
+                )));
+            }
+            for (i, line) in new_lines.iter().take(max_each).enumerate() {
+                let marker = if i == 0 { "  + " } else { "    " };
+                out.push(Line::from(vec![
+                    Span::styled(marker.to_string(), bg.fg(Color::Green)),
+                    Span::styled((*line).to_string(), bg.fg(Color::Green)),
+                ]));
+            }
+            if new_lines.len() > max_each {
+                out.push(Line::from(Span::styled(
+                    format!("    … {} more added line(s)", new_lines.len() - max_each),
+                    bg.fg(Color::DarkGray),
+                )));
+            }
+        }
+        "write" => {
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if content.is_empty() {
+                return out;
+            }
+            let max = 6usize;
+            for line in content.split('\n').take(max) {
+                out.push(Line::from(vec![
+                    Span::styled("  + ".to_string(), bg.fg(Color::Green)),
+                    Span::styled(line.to_string(), bg.fg(Color::Green)),
+                ]));
+            }
+            let total = content.split('\n').count();
+            if total > max {
+                out.push(Line::from(Span::styled(
+                    format!("    … {} more line(s)", total - max),
+                    bg.fg(Color::DarkGray),
+                )));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 fn preview_tool_args(input: &serde_json::Value) -> String {
     fn first_str<'a>(obj: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
         for k in keys {

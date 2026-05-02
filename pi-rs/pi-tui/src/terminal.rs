@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyEvent, MouseEvent},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, MouseEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -24,6 +24,8 @@ pub enum TerminalEvent {
     Mouse(MouseEvent),
     /// Terminal resize event (width, height)
     Resize(u16, u16),
+    /// Bracketed paste from the terminal.
+    Paste(String),
     /// Tick for animation/updates
     Tick,
 }
@@ -48,7 +50,7 @@ impl Terminal {
         // Enable raw mode and setup terminal
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
 
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(backend)?;
@@ -68,6 +70,7 @@ impl Terminal {
                             Event::Key(key) => TerminalEvent::Key(key),
                             Event::Mouse(mouse) => TerminalEvent::Mouse(mouse),
                             Event::Resize(w, h) => TerminalEvent::Resize(w, h),
+                            Event::Paste(s) => TerminalEvent::Paste(s),
                             _ => continue,
                         };
 
@@ -129,7 +132,7 @@ impl Terminal {
     fn restore_terminal() -> Result<()> {
         disable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        execute!(stdout, LeaveAlternateScreen)?;
+        execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
         Ok(())
     }
 }
