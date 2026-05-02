@@ -4,8 +4,9 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent, KeyboardEnhancementFlags,
-        MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyEvent, KeyboardEnhancementFlags, MouseEvent,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -56,7 +57,12 @@ impl Terminal {
         // Enable raw mode and setup terminal
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         // Kitty keyboard protocol: lets us distinguish Shift+Enter from
         // plain Enter, catch key *releases*, and disambiguate the
         // classic Esc=Ctrl+[ overload. Querying first avoids errors on
@@ -156,7 +162,12 @@ impl Terminal {
         // a no-op on terminals that never received the push, so it's
         // safe to unconditionally execute.
         let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-        execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+        execute!(
+            stdout,
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        )?;
         Ok(())
     }
 }

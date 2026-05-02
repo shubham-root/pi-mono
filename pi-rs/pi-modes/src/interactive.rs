@@ -331,6 +331,12 @@ pub struct InteractiveMode {
     autocomplete_items: Vec<crate::autocomplete::Suggestion>,
     autocomplete_selected: usize,
 
+    /// Number of visual rows the transcript is scrolled up from the
+    /// bottom. `0` means bottom-anchored (latest visible). Incremented
+    /// by mouse wheel up / PageUp; decremented by wheel down / PageDown.
+    /// Clamped in the renderer against the total transcript height.
+    messages_scroll: usize,
+
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
 
@@ -430,6 +436,7 @@ impl InteractiveMode {
             autocomplete_fragment_start: 0,
             autocomplete_items: Vec::new(),
             autocomplete_selected: 0,
+            messages_scroll: 0,
             sessions_dir: default_sessions_dir(),
             last_escape_time: None,
             ctrl_c_count: 0,
@@ -448,12 +455,27 @@ impl InteractiveMode {
                 let cont = match event {
                     AppEvent::Key(cmd) => self.handle_key(cmd).await?,
                     AppEvent::Paste(text) => {
-                        // Strip a single trailing newline (common when
-                        // pasting a line from another terminal) so the
-                        // paste does not accidentally submit the turn.
                         let trimmed = text.trim_end_matches('\n').to_string();
                         self.editor.insert_str(&trimmed);
                         self.refresh_autocomplete();
+                        true
+                    }
+                    AppEvent::Mouse(m) => {
+                        // Mouse wheel is the only mouse input we care
+                        // about today. When an overlay list is open,
+                        // wheel moves the selected row; otherwise it
+                        // scrolls the transcript. Three lines per tick
+                        // feels right for typical wheel granularity.
+                        use crossterm::event::MouseEventKind;
+                        match m.kind {
+                            MouseEventKind::ScrollUp => {
+                                self.handle_scroll_up(3);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                self.handle_scroll_down(3);
+                            }
+                            _ => {}
+                        }
                         true
                     }
                     _ => true,
@@ -1401,7 +1423,84 @@ impl InteractiveMode {
                 Ok(true)
             }
 
+            // ---------- Page / transcript scroll ----------
+            KeyCommand::PageUp => {
+                self.handle_scroll_up(10);
+                Ok(true)
+            }
+            KeyCommand::PageDown => {
+                self.handle_scroll_down(10);
+                Ok(true)
+            }
+
             _ => Ok(true),
+        }
+    }
+
+    /// Move the selected row / transcript up by `n` rows. When an
+    /// overlay list is open it steps the list selection (the draw
+    /// routine auto-scrolls to keep the selected row in view); when
+    /// Chat mode is active it increases `messages_scroll` so older
+    /// rows come into view.
+    fn handle_scroll_up(&mut self, n: usize) {
+        if self.palette_active && !self.palette_items.is_empty() {
+            self.palette_selected = self.palette_selected.saturating_sub(n);
+        } else if self.autocomplete_active && !self.autocomplete_items.is_empty() {
+            self.autocomplete_selected = self.autocomplete_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::ModelList {
+            self.model_selected = self.model_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::SettingsList {
+            self.settings_selected = self.settings_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::LoginList {
+            self.login_selected = self.login_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::TreeView {
+            self.tree_selected = self.tree_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::ThinkingList {
+            self.thinking_selected = self.thinking_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::Chat {
+            self.messages_scroll = self.messages_scroll.saturating_add(n);
+        }
+    }
+
+    /// Mirror of `handle_scroll_up` going the other way.
+    fn handle_scroll_down(&mut self, n: usize) {
+        if self.palette_active {
+            let len = self.palette_items.len();
+            if len > 0 {
+                self.palette_selected = (self.palette_selected + n).min(len - 1);
+            }
+        } else if self.autocomplete_active {
+            let len = self.autocomplete_items.len();
+            if len > 0 {
+                self.autocomplete_selected = (self.autocomplete_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::ModelList {
+            let len = self.model_list.len();
+            if len > 0 {
+                self.model_selected = (self.model_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::SettingsList {
+            let len = self.settings_list.len();
+            if len > 0 {
+                self.settings_selected = (self.settings_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::LoginList {
+            let len = self.login_list.len();
+            if len > 0 {
+                self.login_selected = (self.login_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::TreeView {
+            let len = self.tree_rows.len();
+            if len > 0 {
+                self.tree_selected = (self.tree_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::ThinkingList {
+            let len = self.thinking_options.len();
+            if len > 0 {
+                self.thinking_selected = (self.thinking_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::Chat {
+            self.messages_scroll = self.messages_scroll.saturating_sub(n);
         }
     }
 
@@ -1745,6 +1844,10 @@ impl InteractiveMode {
     /// assistant placeholder is created inside `spawn_prompt` so the
     /// indices line up for `poll_active_job`.
     fn send_message(&mut self, text: &str) {
+        // Any outgoing user submission snaps the transcript back to
+        // the live end so the user sees their new message plus the
+        // agent's reply without having to scroll.
+        self.messages_scroll = 0;
         self.messages.push(ConversationMessage {
             role: "user".to_string(),
             content: text.to_string(),
@@ -1818,6 +1921,7 @@ impl InteractiveMode {
         let autocomplete_selected = self.autocomplete_selected;
         let autocomplete_kind = self.autocomplete_kind;
         let last_call = self.last_call.clone();
+        let messages_scroll = self.messages_scroll;
 
         // Footer inputs: pwd + branch on one line, token stats + model on
         // the next. These are resolved via the registry so they stay truthy
@@ -1955,15 +2059,19 @@ impl InteractiveMode {
             } else {
                 let lines = render_messages(&messages, show_thinking, show_tools);
                 // Pin the most recent messages to the BOTTOM of the
-                // messages area so the editor feels glued to the live end
-                // of the conversation, matching the TS flow. Older lines
-                // scroll off the top.
+                // messages area by default; honor `messages_scroll`
+                // (rows scrolled up from bottom) when set by mouse
+                // wheel / PageUp. The renderer clamps against the
+                // available lines.
                 let avail = msg_area.height as usize;
-                let n = lines.len();
-                let slice: Vec<Line> = if n >= avail {
-                    lines.into_iter().skip(n - avail).collect()
+                let total = lines.len();
+                let scroll_up = messages_scroll.min(total.saturating_sub(avail));
+                let slice: Vec<Line> = if total >= avail {
+                    let end = total - scroll_up;
+                    let start = end.saturating_sub(avail);
+                    lines[start..end].to_vec()
                 } else {
-                    let pad = avail - n;
+                    let pad = avail - total;
                     let mut out: Vec<Line> = (0..pad).map(|_| Line::from("")).collect();
                     out.extend(lines);
                     out
@@ -1980,8 +2088,9 @@ impl InteractiveMode {
                     width: size.width,
                     height: overlay_height,
                 };
-                let overlay_lines = if palette_active {
-                    render_palette(&palette_items, palette_selected)
+                let (overlay_lines, selected_line) = if palette_active {
+                    let (l, s) = render_palette(&palette_items, palette_selected);
+                    (l, s)
                 } else if display_mode == DisplayMode::ModelList {
                     render_model_list(&model_list, model_selected, &model_filter)
                 } else if display_mode == DisplayMode::SettingsList {
@@ -1993,11 +2102,15 @@ impl InteractiveMode {
                         .as_deref()
                         .unwrap_or("provider")
                         .to_string();
-                    render_login_key_entry(&provider_label, login_key_len)
+                    (render_login_key_entry(&provider_label, login_key_len), None)
                 } else if display_mode == DisplayMode::TreeView {
                     render_tree(&tree_rows, tree_selected)
                 } else if display_mode == DisplayMode::ThinkingList {
-                    render_thinking_list(&thinking_options, thinking_selected, thinking_level)
+                    render_thinking_list(
+                        &thinking_options,
+                        thinking_selected,
+                        thinking_level,
+                    )
                 } else if autocomplete_active {
                     render_autocomplete_dropdown(
                         autocomplete_kind,
@@ -2005,9 +2118,31 @@ impl InteractiveMode {
                         autocomplete_selected,
                     )
                 } else {
-                    Vec::new()
+                    (Vec::<Line>::new(), None)
                 };
-                let para = Paragraph::new(overlay_lines).wrap(Wrap { trim: false });
+                // Auto-scroll so the selected row stays inside the
+                // overlay's visible region. The first line is a header
+                // we always want pinned at top, so reserve it and work
+                // on the body height.
+                let body_h = overlay_height.saturating_sub(1) as usize;
+                let scroll = match selected_line {
+                    Some(sel) if sel > 0 && body_h > 0 => {
+                        // sel is a 1-based line index into `overlay_lines`.
+                        // We want (sel - scroll) to lie in
+                        // [1, body_h] (i.e. selected within body).
+                        let min_needed = (sel + 1).saturating_sub(body_h);
+                        let max_allowed = sel.saturating_sub(1);
+                        // Pin scroll to keep selected in view, but
+                        // don't scroll past the last page.
+                        let total_body = overlay_lines.len().saturating_sub(1);
+                        let max_scroll = total_body.saturating_sub(body_h);
+                        min_needed.min(max_allowed).min(max_scroll) as u16
+                    }
+                    _ => 0u16,
+                };
+                let para = Paragraph::new(overlay_lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll, 0));
                 frame.render_widget(para, overlay_area);
             }
 
@@ -2621,7 +2756,7 @@ fn render_autocomplete_dropdown(
     kind: Option<crate::autocomplete::TriggerKind>,
     items: &[crate::autocomplete::Suggestion],
     selected: usize,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     let title = match kind {
         Some(crate::autocomplete::TriggerKind::File) => format!("Files ({})", items.len()),
         Some(crate::autocomplete::TriggerKind::Bash) => format!("Commands ({})", items.len()),
@@ -2634,8 +2769,12 @@ fn render_autocomplete_dropdown(
         title,
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ))];
+    let mut selected_line: Option<usize> = None;
     for (i, s) in items.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2647,16 +2786,23 @@ fn render_autocomplete_dropdown(
             Span::styled(s.label.clone(), style),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
-fn render_palette(items: &[SlashCommand], selected: usize) -> Vec<Line<'static>> {
+fn render_palette(
+    items: &[SlashCommand],
+    selected: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = vec![Line::from(Span::styled(
         format!("Commands ({})", items.len()),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ))];
+    let mut selected_line: Option<usize> = None;
     for (i, cmd) in items.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let name_style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2670,14 +2816,14 @@ fn render_palette(items: &[SlashCommand], selected: usize) -> Vec<Line<'static>>
             Span::styled(cmd.description.clone(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 fn render_model_list(
     rows: &[ModelRow],
     selected: usize,
     filter: &str,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("Models ({})", rows.len()),
@@ -2715,6 +2861,7 @@ fn render_model_list(
         Span::raw("  "),
         Span::styled("id", dim_style().add_modifier(Modifier::UNDERLINED)),
     ]));
+    let mut selected_line: Option<usize> = None;
     let mut current_provider = String::new();
     for (i, m) in rows.iter().enumerate() {
         if m.provider_id != current_provider {
@@ -2729,6 +2876,9 @@ fn render_model_list(
             ]));
         }
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let name_style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2757,7 +2907,7 @@ fn render_model_list(
             Span::styled(m.model_id.clone(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 fn truncate_for_col(s: &str, max: usize) -> String {
@@ -2770,13 +2920,20 @@ fn truncate_for_col(s: &str, max: usize) -> String {
     }
 }
 
-fn render_settings_list(rows: &[SettingInfo], selected: usize) -> Vec<Line<'static>> {
+fn render_settings_list(
+    rows: &[SettingInfo],
+    selected: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = vec![Line::from(Span::styled(
         format!("Settings ({})", rows.len()),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ))];
+    let mut selected_line: Option<usize> = None;
     for (i, s) in rows.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let name_style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2792,7 +2949,7 @@ fn render_settings_list(rows: &[SettingInfo], selected: usize) -> Vec<Line<'stat
             Span::styled(s.options.clone(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 // ----- LoginRow + build/render helpers + tree rows + thinking list + export
@@ -2839,13 +2996,20 @@ fn build_login_rows(
     rows
 }
 
-fn render_login_list(rows: &[LoginRow], selected: usize) -> Vec<Line<'static>> {
+fn render_login_list(
+    rows: &[LoginRow],
+    selected: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = vec![Line::from(Span::styled(
         format!("Sign in ({} providers)", rows.len()),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ))];
+    let mut selected_line: Option<usize> = None;
     for (i, r) in rows.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let name_style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2866,7 +3030,7 @@ fn render_login_list(rows: &[LoginRow], selected: usize) -> Vec<Line<'static>> {
             Span::styled(r.env_hint.clone(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 fn render_login_key_entry(provider: &str, key_len: usize) -> Vec<Line<'static>> {
@@ -2936,7 +3100,7 @@ fn truncate_first_line(s: &str, max: usize) -> String {
     }
 }
 
-fn render_tree(rows: &[TreeRow], selected: usize) -> Vec<Line<'static>> {
+fn render_tree(rows: &[TreeRow], selected: usize) -> (Vec<Line<'static>>, Option<usize>) {
     let mut lines = vec![Line::from(Span::styled(
         format!("Session tree ({} nodes)", rows.len()),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -2946,10 +3110,14 @@ fn render_tree(rows: &[TreeRow], selected: usize) -> Vec<Line<'static>> {
             "  (transcript is empty)".to_string(),
             dim_style(),
         )));
-        return lines;
+        return (lines, None);
     }
+    let mut selected_line: Option<usize> = None;
     for (i, r) in rows.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let indent = "  ".repeat(r.depth);
         let prefix = if is_sel { "› " } else { "  " };
         let label_style = if is_sel {
@@ -2966,14 +3134,14 @@ fn render_tree(rows: &[TreeRow], selected: usize) -> Vec<Line<'static>> {
             Span::styled(r.hint.clone(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 fn render_thinking_list(
     options: &[&'static str],
     selected: usize,
     current: Option<pi_ai::types::ThinkingLevel>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     let current_str = match current {
         Some(pi_ai::types::ThinkingLevel::Minimal) => "minimal",
         Some(pi_ai::types::ThinkingLevel::Low) => "low",
@@ -2986,8 +3154,12 @@ fn render_thinking_list(
         format!("Thinking level (current: {current_str})"),
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     ))];
+    let mut selected_line: Option<usize> = None;
     for (i, opt) in options.iter().enumerate() {
         let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
         let prefix = if is_sel { "› " } else { "  " };
         let style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -3008,7 +3180,7 @@ fn render_thinking_list(
             Span::styled(marker.to_string(), dim_style()),
         ]));
     }
-    lines
+    (lines, selected_line)
 }
 
 fn thinking_level_from_label(label: &str) -> Option<pi_ai::types::ThinkingLevel> {

@@ -16,6 +16,7 @@ use tokio::sync::mpsc as async_mpsc;
 pub enum AppEvent {
     Key(KeyCommand),
     Paste(String),
+    Mouse(crossterm::event::MouseEvent),
     AgentMessage(String),
     AgentToolCall { tool: String, args: String },
     AgentToolResult { result: String },
@@ -69,7 +70,7 @@ impl EventLoop {
             return Some(match term_event {
                 TerminalEvent::Key(key) => AppEvent::Key(parse_key_event(key)),
                 TerminalEvent::Resize(w, h) => AppEvent::Resize(w, h),
-                TerminalEvent::Mouse(_) => return None,
+                TerminalEvent::Mouse(m) => AppEvent::Mouse(m),
                 TerminalEvent::Paste(s) => AppEvent::Paste(s),
                 TerminalEvent::Tick => AppEvent::Tick,
             });
