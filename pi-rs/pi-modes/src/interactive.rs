@@ -322,6 +322,10 @@ pub struct InteractiveMode {
     // Escape/Ctrl+C tracking
     last_escape_time: Option<std::time::Instant>,
     ctrl_c_count: u32,
+    /// Set to `true` by `/quit` (and any other shutdown path) so the
+    /// main event loop can exit cleanly from outside the Ctrl+C
+    /// handler. Checked after every key / tick.
+    should_exit: bool,
 
     // Active prompt request. When this is `Some`, `agent` is `None` because
     // the agent has been moved into the background task; it returns via the
@@ -395,6 +399,7 @@ impl InteractiveMode {
             sessions_dir: default_sessions_dir(),
             last_escape_time: None,
             ctrl_c_count: 0,
+            should_exit: false,
             active_job: None,
             usage: UsageStats::default(),
             last_call: None,
@@ -420,6 +425,13 @@ impl InteractiveMode {
                     _ => true,
                 };
                 if !cont {
+                    break;
+                }
+                // `/quit` (and any other slash command) sets
+                // `should_exit`. Check here so the current frame still
+                // draws the "Exiting..." status before we tear down.
+                if self.should_exit {
+                    let _ = self.draw();
                     break;
                 }
             }
@@ -1479,8 +1491,13 @@ impl InteractiveMode {
                 }
             }
             "quit" => {
+                // Signal the main event loop to break cleanly. Unlike
+                // Ctrl+C (which is handled inside `KeyCommand::CtrlC`
+                // and can short-circuit the loop by returning Ok(false)),
+                // a slash command runs inside `execute_command` and
+                // has no return channel, so we need a shared flag.
                 self.status = "Exiting...".to_string();
-                self.ctrl_c_count = 2;
+                self.should_exit = true;
             }
             _ => {
                 self.status = format!("Unknown command: /{}", name);
