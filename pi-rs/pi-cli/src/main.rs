@@ -58,6 +58,26 @@ const DEFAULT_PROVIDER_PRIORITY: &[&str] = &[
 /// a warning is printed and the TUI still starts (useful for read-only UI
 /// navigation before auth is configured).
 ///
+/// Priority order (highest to lowest):
+///
+///   1. `--model <id>` flag on the command line. Always wins for the
+///      current session; does NOT get persisted as the new default
+///      unless the user also runs `/model` at runtime to save it.
+///   2. `.pi/config.toml` in the current working directory (project-
+///      pinned model). Overrides the global config so a repo can pin
+///      a model for everyone who opens pi there.
+///   3. `~/Library/Application Support/pi/config.toml` on macOS
+///      (`~/.config/pi/config.toml` on Linux) — the global
+///      last-used model. Written by `/model` when there's no
+///      project `.pi/` folder.
+///   4. `DEFAULT_PROVIDER_PRIORITY` scan for the first provider with
+///      a configured env key.
+///   5. Any registry-known provider with a configured env key.
+///
+/// If all five produce nothing, strict-mode exits; otherwise the TUI
+/// starts with a warning and falls back to an arbitrary model id so
+/// the UI can still render.
+///
 /// The returned model id is always fully qualified (`provider_id/model_id`)
 /// so downstream `resolve_model` never has to guess which provider owns a
 /// bare id that happens to exist under several providers (e.g.
@@ -68,9 +88,10 @@ fn resolve_model_and_key(
 ) -> (String, Option<String>) {
     let registry = ModelRegistry::global();
 
-    // 1. Explicit --model flag: accept either bare or qualified form. Look
-    //    up the provider for env-var resolution; keep the user-supplied id
-    //    as-is so error messages match what they typed.
+    // 1. Explicit --model flag wins for the current session. We do
+    //    NOT persist it to config — that's the job of `/model` at
+    //    runtime. Passing `--model X` for a one-off session should
+    //    not rewrite the saved default.
     if let Some(model_id) = cli_model {
         let found = if let Some((pid, mid)) = model_id.split_once('/') {
             registry.find_by_provider(pid, mid)
@@ -99,9 +120,12 @@ fn resolve_model_and_key(
 
     // 2. No --model: consult saved settings first — pi remembers the
     //    last-used model so users don't have to retype `--model` every
-    //    session. If the saved id is still in the registry and still has
-    //    auth configured, use it.
-    if let Ok(settings) = pi_core::settings::Settings::load_global() {
+    //    session. Project `.pi/config.toml` (in cwd) wins over the
+    //    global config so a repo can pin a model for everyone who
+    //    opens pi in it. If the resolved id is still in the registry
+    //    and still has auth configured, use it.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if let Ok(settings) = pi_core::settings::Settings::load_merged(&cwd) {
         if let Some(saved) = settings.model.as_deref() {
             let found = if let Some((pid, mid)) = saved.split_once('/') {
                 registry.find_by_provider(pid, mid)

@@ -43,6 +43,7 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
         SlashCommand { name: "export".to_string(), description: "Export to HTML file".to_string() },
         SlashCommand { name: "share".to_string(), description: "Share as GitHub gist".to_string() },
         SlashCommand { name: "compact".to_string(), description: "Manual context compaction".to_string() },
+        SlashCommand { name: "pin".to_string(), description: "Pin current model to this project (.pi/config.toml)".to_string() },
         SlashCommand { name: "thinking".to_string(), description: "Set reasoning level".to_string() },
         SlashCommand { name: "copy".to_string(), description: "Copy last assistant message".to_string() },
         SlashCommand { name: "reload".to_string(), description: "Reload config and extensions".to_string() },
@@ -1662,6 +1663,32 @@ impl InteractiveMode {
                     }
                 }
             }
+            "pin" => {
+                // Pin the current model as the project default by
+                // writing `.pi/config.toml` in cwd. The folder is
+                // created if it doesn't exist. Subsequent model
+                // switches in this cwd persist to the same file.
+                let model_id = self
+                    .agent
+                    .as_ref()
+                    .map(|a| a.model_id().to_string())
+                    .unwrap_or_default();
+                if model_id.is_empty() {
+                    self.status = "No active model to pin".to_string();
+                } else {
+                    match pin_model_to_project(&model_id) {
+                        Ok(path) => {
+                            self.status = format!(
+                                "Pinned {model_id} \u{2192} {}",
+                                path.display()
+                            );
+                        }
+                        Err(e) => {
+                            self.status = format!("Pin failed: {e}");
+                        }
+                    }
+                }
+            }
             "quit" => {
                 // Signal the main event loop to break cleanly. Unlike
                 // Ctrl+C (which is handled inside `KeyCommand::CtrlC`
@@ -3037,18 +3064,65 @@ fn budget_hint_for_level(label: &str) -> &'static str {
     }
 }
 
-/// Persist `model_id` as the user's current default by merging into
-/// `~/.config/pi/config.toml` via `pi_core::settings::Settings`. This
-/// is how pi remembers the last-used model across sessions — the CLI
-/// reads this on startup when `--model` is not supplied.
+/// Persist `model_id` as the user's current default so the next `pi`
+/// session picks it up automatically. Writes project-local
+/// `.pi/config.toml` when the current working directory already has
+/// a `.pi/` folder (project-pinned model), otherwise writes the
+/// platform-global config. Always merges into any existing file so
+/// we don't clobber other settings like `thinking` or custom
+/// extension values.
 fn persist_last_model(model_id: &str) -> Result<()> {
-    let mut settings = pi_core::settings::Settings::load_global().unwrap_or_default();
-    settings.model = Some(model_id.to_string());
-    settings.save_global()?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("resolve cwd: {e}"))?;
+    let project_dir = cwd.join(".pi");
+    let use_project = project_dir.is_dir();
+    if use_project {
+        // Project config takes priority on read; write back to the
+        // same file so the round-trip stays consistent.
+        let mut settings =
+            pi_core::settings::Settings::load_project(&cwd).unwrap_or_default();
+        settings.model = Some(model_id.to_string());
+        settings.save_project(&cwd)?;
+    } else {
+        let mut settings =
+            pi_core::settings::Settings::load_global().unwrap_or_default();
+        settings.model = Some(model_id.to_string());
+        settings.save_global()?;
+    }
     Ok(())
 }
 
+/// Explicitly pin the given model to the project's
+/// `.pi/config.toml`, creating `.pi/` in cwd if needed. Returns the
+/// path we wrote to so the UI can surface it.
+fn pin_model_to_project(model_id: &str) -> Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("resolve cwd: {e}"))?;
+    // `save_project` already calls `create_dir_all` on the parent,
+    // so we don't need to create `.pi/` ourselves — but do it first
+    // so the path is always present even if the save fails.
+    let project_dir = cwd.join(".pi");
+    fs::create_dir_all(&project_dir)
+        .map_err(|e| anyhow::anyhow!("create {}: {e}", project_dir.display()))?;
+    let mut settings =
+        pi_core::settings::Settings::load_project(&cwd).unwrap_or_default();
+    settings.model = Some(model_id.to_string());
+    settings.save_project(&cwd)?;
+    Ok(project_dir.join("config.toml"))
+}
+
 fn default_sessions_dir() -> PathBuf {
+    // Prefer project-local `.pi/sessions/` when the current directory
+    // is already a pi-managed project (i.e. has a `.pi/` folder). This
+    // keeps forked session transcripts alongside the project they
+    // belong to. Fall back to the global `~/.pi/sessions/` for
+    // directories that aren't pi projects yet.
+    if let Ok(cwd) = std::env::current_dir() {
+        let project_pi = cwd.join(".pi");
+        if project_pi.is_dir() {
+            return project_pi.join("sessions");
+        }
+    }
     if let Some(home) = dirs::home_dir() {
         home.join(".pi").join("sessions")
     } else {
