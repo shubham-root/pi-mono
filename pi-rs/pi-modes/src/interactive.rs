@@ -39,6 +39,7 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
         SlashCommand { name: "new".to_string(), description: "Start fresh session".to_string() },
         SlashCommand { name: "tree".to_string(), description: "Show session tree".to_string() },
         SlashCommand { name: "session".to_string(), description: "Show session info".to_string() },
+        SlashCommand { name: "resume".to_string(), description: "Resume a saved session".to_string() },
         SlashCommand { name: "fork".to_string(), description: "Fork session".to_string() },
         SlashCommand { name: "export".to_string(), description: "Export to HTML file".to_string() },
         SlashCommand { name: "share".to_string(), description: "Share as GitHub gist".to_string() },
@@ -204,6 +205,8 @@ enum DisplayMode {
     TreeView,
     /// Thinking-level cycling overlay.
     ThinkingList,
+    /// Resume-session picker (populated from `SessionManager::list_with_paths`).
+    SessionList,
 }
 
 /// Conversation entry rendered in the chat area. We remember enough
@@ -340,6 +343,19 @@ pub struct InteractiveMode {
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
 
+    /// Session manager and current session for auto-persisted
+    /// transcripts. Every user/assistant exchange appends a
+    /// `SessionEntry::Message` to the JSONL file on disk so the
+    /// conversation survives process restarts. `/new` rotates both
+    /// to fresh values; `/resume` swaps them to a chosen saved
+    /// session's state.
+    session_manager: pi_core::session::SessionManager,
+    current_session: Option<pi_core::session::Session>,
+
+    // Session picker (SessionList display mode)
+    session_list: Vec<SessionBrowserRow>,
+    session_list_selected: usize,
+
     // Escape/Ctrl+C tracking
     last_escape_time: Option<std::time::Instant>,
     ctrl_c_count: u32,
@@ -399,17 +415,66 @@ struct PromptJob {
 
 impl InteractiveMode {
     pub fn new(agent: Agent) -> Result<Self> {
+        Self::new_with_session(agent, None)
+    }
+
+    /// Construct the TUI with an explicit starting session. `None`
+    /// auto-creates a fresh session in the per-cwd default directory;
+    /// `Some(session)` hydrates the transcript from an existing file
+    /// (typically returned by `SessionManager::continue_recent` or
+    /// `SessionManager::open_path`).
+    pub fn new_with_session(
+        agent: Agent,
+        resume: Option<pi_core::session::Session>,
+    ) -> Result<Self> {
         let event_loop = EventLoop::new()?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let session_manager = pi_core::session::SessionManager::for_cwd(&cwd)?;
+
+        // Bootstrap current_session: either the caller-provided
+        // resumed session or a fresh on-disk session so
+        // `append_entry()` persists from turn #0.
+        let (current_session, hydrated_messages, status_line) = match resume {
+            Some(session) => {
+                let msgs = session_to_conversation_rows(&session);
+                let path = session
+                    .file_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| session.id().to_string());
+                let status = format!(
+                    "Resumed session {} ({} msgs) \u{2192} {}",
+                    session.id(),
+                    session.messages().len(),
+                    path
+                );
+                (Some(session), msgs, status)
+            }
+            None => {
+                let model = agent.model_id().to_string();
+                let cwd_str = cwd.display().to_string();
+                match session_manager.create_on_disk(&model, &cwd_str) {
+                    Ok(s) => (Some(s), Vec::new(), "Ready. Type / for commands, Enter to send, Ctrl+C twice to quit.".to_string()),
+                    Err(e) => (
+                        None,
+                        Vec::new(),
+                        format!(
+                            "(no persistence) {e}. Type / for commands, Enter to send."
+                        ),
+                    ),
+                }
+            }
+        };
+
         Ok(Self {
             event_loop,
             agent: Some(agent),
-            messages: Vec::new(),
+            messages: hydrated_messages,
             editor: InputEditor::new(),
             queued_messages: Vec::new(),
             pending_steering: 0,
             pending_followup: 0,
             current_assistant_index: None,
-            status: "Ready. Type / for commands, Enter to send, Ctrl+C twice to quit.".to_string(),
+            status: status_line,
             executing: false,
             show_thinking: false,
             show_tools: false,
@@ -438,6 +503,10 @@ impl InteractiveMode {
             autocomplete_selected: 0,
             messages_scroll: 0,
             sessions_dir: default_sessions_dir(),
+            session_manager,
+            current_session,
+            session_list: Vec::new(),
+            session_list_selected: 0,
             last_escape_time: None,
             ctrl_c_count: 0,
             should_exit: false,
@@ -570,6 +639,29 @@ impl InteractiveMode {
 
         match job.handle.await {
             Ok((agent, result)) => {
+                // Before we restore the agent handle, snapshot all
+                // messages it accumulated during the run (assistant
+                // turns, tool results, injected steering/follow-ups)
+                // and persist anything the session file doesn't
+                // already know about. The agent is the authoritative
+                // history; we only appended user submissions ourselves
+                // in send_message/AltEnter handlers.
+                {
+                    let agent_msgs = agent.messages();
+                    if let Some(session) = self.current_session.as_mut() {
+                        // Skip messages that are already in the session
+                        // (replayed or previously appended). The session
+                        // `messages()` vector stays in lock-step with
+                        // `append_entry` so length is a valid cursor.
+                        let already = session.messages().len();
+                        for msg in agent_msgs.iter().skip(already) {
+                            let entry = pi_core::session::SessionEntry::message(msg.clone());
+                            let _ = session.append_entry(entry);
+                            session.messages.push(msg.clone());
+                            session.metadata.message_count += 1;
+                        }
+                    }
+                }
                 self.agent = Some(agent);
                 if let Some(msg) = self.messages.get_mut(assistant_index) {
                     msg.streaming = false;
@@ -1038,6 +1130,52 @@ impl InteractiveMode {
                 } else if self.display_mode == DisplayMode::TreeView {
                     // Enter on a tree node is a no-op for now; Esc returns.
                     self.status = "Tree node selected (navigation only for now)".to_string();
+                } else if self.display_mode == DisplayMode::SessionList {
+                    if self.active_job.is_some() {
+                        self.status =
+                            "Wait for the current turn to finish before resuming".to_string();
+                        self.display_mode = DisplayMode::Chat;
+                    } else if let Some(row) = self.session_list.get(self.session_list_selected).cloned() {
+                        match self.session_manager.open_path(&row.file_path) {
+                            Ok(session) => {
+                                // Hydrate UI transcript from the saved
+                                // session so the user sees prior turns
+                                // immediately.
+                                let replay = session_to_conversation_rows(&session);
+                                // Hydrate the agent's internal context
+                                // so the next prompt continues the
+                                // conversation instead of starting
+                                // fresh. We clone messages out of the
+                                // session because the Agent owns its
+                                // own `Vec<Message>`.
+                                if let Some(agent) = self.agent.as_mut() {
+                                    agent.set_messages(session.messages().to_vec());
+                                    // Also swap the model to match the
+                                    // saved session so provider/api
+                                    // key resolve to the right place.
+                                    let _ = agent.set_model(&session.metadata().model);
+                                }
+                                self.messages = replay;
+                                self.messages_scroll = 0;
+                                self.usage = UsageStats::default();
+                                self.last_call = None;
+                                self.status = format!(
+                                    "Resumed {} ({} msgs) \u{2192} {}",
+                                    session.id(),
+                                    session.messages().len(),
+                                    session
+                                        .file_path()
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_default(),
+                                );
+                                self.current_session = Some(session);
+                            }
+                            Err(e) => {
+                                self.status = format!("Resume failed: {e}");
+                            }
+                        }
+                        self.display_mode = DisplayMode::Chat;
+                    }
                 } else if !self.editor.is_empty() {
                     // Send message
                     let msg = self.editor.text().trim().to_string();
@@ -1072,15 +1210,21 @@ impl InteractiveMode {
                 }
                 let msg = self.editor.text().trim().to_string();
                 if let Some(job) = self.active_job.as_ref() {
-                    // Push the user bubble into the transcript right
-                    // away so the user sees their submission land, even
-                    // though the agent won't drain the channel until
-                    // the current inner loop finishes.
                     self.messages.push(ConversationMessage {
                         role: "user".to_string(),
                         content: msg.clone(),
                         ..Default::default()
                     });
+                    if let Some(session) = self.current_session.as_mut() {
+                        let user_msg = pi_ai::types::Message::User(vec![pi_ai::types::Content::Text {
+                            text: msg.clone(),
+                            cache_control: None,
+                        }]);
+                        let entry = pi_core::session::SessionEntry::message(user_msg.clone());
+                        let _ = session.append_entry(entry);
+                        session.messages.push(user_msg);
+                        session.metadata.message_count += 1;
+                    }
                     let _ = job.followup_tx.send(msg);
                     self.pending_followup += 1;
                     self.status = format!(
@@ -1292,6 +1436,9 @@ impl InteractiveMode {
                     self.tree_selected = self.tree_selected.saturating_sub(1);
                 } else if self.display_mode == DisplayMode::ThinkingList {
                     self.thinking_selected = self.thinking_selected.saturating_sub(1);
+                } else if self.display_mode == DisplayMode::SessionList {
+                    self.session_list_selected =
+                        self.session_list_selected.saturating_sub(1);
                 }
                 Ok(true)
             }
@@ -1325,6 +1472,12 @@ impl InteractiveMode {
                 } else if self.display_mode == DisplayMode::ThinkingList {
                     if self.thinking_selected < self.thinking_options.len() - 1 {
                         self.thinking_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::SessionList
+                    && !self.session_list.is_empty()
+                {
+                    if self.session_list_selected < self.session_list.len() - 1 {
+                        self.session_list_selected += 1;
                     }
                 }
                 Ok(true)
@@ -1457,6 +1610,8 @@ impl InteractiveMode {
             self.tree_selected = self.tree_selected.saturating_sub(n);
         } else if self.display_mode == DisplayMode::ThinkingList {
             self.thinking_selected = self.thinking_selected.saturating_sub(n);
+        } else if self.display_mode == DisplayMode::SessionList {
+            self.session_list_selected = self.session_list_selected.saturating_sub(n);
         } else if self.display_mode == DisplayMode::Chat {
             self.messages_scroll = self.messages_scroll.saturating_add(n);
         }
@@ -1498,6 +1653,11 @@ impl InteractiveMode {
             let len = self.thinking_options.len();
             if len > 0 {
                 self.thinking_selected = (self.thinking_selected + n).min(len - 1);
+            }
+        } else if self.display_mode == DisplayMode::SessionList {
+            let len = self.session_list.len();
+            if len > 0 {
+                self.session_list_selected = (self.session_list_selected + n).min(len - 1);
             }
         } else if self.display_mode == DisplayMode::Chat {
             self.messages_scroll = self.messages_scroll.saturating_sub(n);
@@ -1614,20 +1774,41 @@ impl InteractiveMode {
                 self.queued_messages.clear();
                 self.usage = UsageStats::default();
                 self.last_call = None;
-                // Also clear the agent's own message history so the
-                // next turn doesn't continue the prior conversation.
-                if let Some(agent) = self.agent.as_mut() {
-                    // There is no explicit reset; easiest safe path is to
-                    // rebuild by dropping the old one into a fresh model.
-                    // `/new` should be cheap, but if something is in
-                    // flight we let it finish first.
-                    if self.active_job.is_none() {
-                        let id = agent.model_id().to_string();
-                        let new_agent = Agent::new(&id);
-                        *agent = new_agent;
+                self.messages_scroll = 0;
+                self.pending_steering = 0;
+                self.pending_followup = 0;
+                if self.active_job.is_some() {
+                    self.status =
+                        "Wait for the current turn to finish before starting a new session"
+                            .to_string();
+                    return Ok(());
+                }
+                // Rotate the on-disk session file to a fresh JSONL so
+                // the old transcript stays archived for later
+                // `/resume`.
+                let model = self
+                    .agent
+                    .as_ref()
+                    .map(|a| a.model_id().to_string())
+                    .unwrap_or_default();
+                let cwd_str = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string());
+                match self.session_manager.create_on_disk(&model, &cwd_str) {
+                    Ok(s) => {
+                        let id = s.id().to_string();
+                        self.current_session = Some(s);
+                        self.status = format!("New session {id} started");
+                    }
+                    Err(e) => {
+                        self.current_session = None;
+                        self.status = format!("New session (not persisted: {e})");
                     }
                 }
-                self.status = "New session started".to_string();
+                if let Some(agent) = self.agent.as_mut() {
+                    let id = agent.model_id().to_string();
+                    *agent = Agent::new(&id);
+                }
             }
             "tree" => {
                 self.tree_rows = build_tree_rows(&self.messages);
@@ -1639,10 +1820,36 @@ impl InteractiveMode {
                 );
             }
             "session" => {
+                match self.current_session.as_ref() {
+                    Some(s) => {
+                        let path = s
+                            .file_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(in-memory)".to_string());
+                        self.status = format!(
+                            "Session {} \u{2014} {} msgs \u{2014} model {} \u{2014} {}",
+                            s.id(),
+                            s.messages().len(),
+                            s.metadata().model,
+                            path,
+                        );
+                    }
+                    None => {
+                        self.status = format!(
+                            "Session (unpersisted): {} msgs, {} queued",
+                            self.messages.len(),
+                            self.queued_messages.len()
+                        );
+                    }
+                }
+            }
+            "resume" => {
+                self.session_list = build_session_rows(&self.session_manager);
+                self.session_list_selected = 0;
+                self.display_mode = DisplayMode::SessionList;
                 self.status = format!(
-                    "Session: {} messages, {} queued",
-                    self.messages.len(),
-                    self.queued_messages.len()
+                    "Resume session \u{2014} {} saved. \u{2191}\u{2193} nav, Enter to load, Esc to cancel.",
+                    self.session_list.len()
                 );
             }
             "login" => {
@@ -1844,27 +2051,30 @@ impl InteractiveMode {
     /// assistant placeholder is created inside `spawn_prompt` so the
     /// indices line up for `poll_active_job`.
     fn send_message(&mut self, text: &str) {
-        // Any outgoing user submission snaps the transcript back to
-        // the live end so the user sees their new message plus the
-        // agent's reply without having to scroll.
         self.messages_scroll = 0;
         self.messages.push(ConversationMessage {
             role: "user".to_string(),
             content: text.to_string(),
             ..Default::default()
         });
+        // Persist the user message to the session file right away so
+        // the transcript survives a crash before the assistant reply
+        // lands. Steering submissions also land here so the on-disk
+        // transcript preserves the user's mid-turn redirects.
+        if let Some(session) = self.current_session.as_mut() {
+            let msg = pi_ai::types::Message::User(vec![pi_ai::types::Content::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }]);
+            let entry = pi_core::session::SessionEntry::message(msg.clone());
+            let _ = session.append_entry(entry);
+            session.messages.push(msg);
+            session.metadata.message_count += 1;
+        }
         if let Some(job) = self.active_job.as_ref() {
-            // Agent is already running: route the text into the
-            // steering channel so it's injected between tool calls,
-            // before the next assistant stream. Mirrors TS "steer"
-            // behavior (Enter while streaming). The user bubble is
-            // already in the transcript above.
             let _ = job.steering_tx.send(text.to_string());
             self.pending_steering += 1;
-            self.status = format!(
-                "Steering ({} pending)",
-                self.pending_steering
-            );
+            self.status = format!("Steering ({} pending)", self.pending_steering);
         } else {
             self.spawn_prompt(text.to_string());
         }
@@ -1915,6 +2125,9 @@ impl InteractiveMode {
         let tree_selected = self.tree_selected;
         let thinking_options = self.thinking_options.clone();
         let thinking_selected = self.thinking_selected;
+        let session_list = self.session_list.clone();
+        let session_list_selected = self.session_list_selected;
+        let session_list_len = self.session_list.len();
         let thinking_level = self.agent.as_ref().and_then(|a| a.thinking_level());
         let autocomplete_active = self.autocomplete_active;
         let autocomplete_items = self.autocomplete_items.clone();
@@ -2025,7 +2238,8 @@ impl InteractiveMode {
                 || display_mode == DisplayMode::LoginList
                 || display_mode == DisplayMode::LoginKeyEntry
                 || display_mode == DisplayMode::TreeView
-                || display_mode == DisplayMode::ThinkingList;
+                || display_mode == DisplayMode::ThinkingList
+                || display_mode == DisplayMode::SessionList;
             let overlay_height: u16 = if overlay_active {
                 match display_mode {
                     DisplayMode::ModelList => (model_list.len() as u16 + 3).min(overlay_max_h),
@@ -2034,6 +2248,7 @@ impl InteractiveMode {
                     DisplayMode::LoginKeyEntry => 6,
                     DisplayMode::TreeView => (tree_rows.len() as u16 + 3).min(overlay_max_h),
                     DisplayMode::ThinkingList => (thinking_options.len() as u16 + 3).min(overlay_max_h),
+                    DisplayMode::SessionList => (session_list_len as u16 + 3).min(overlay_max_h),
                     _ if palette_active => (palette_items.len() as u16 + 3).min(overlay_max_h),
                     _ if autocomplete_active => (autocomplete_items.len() as u16 + 2).min(overlay_max_h),
                     _ => 0,
@@ -2111,6 +2326,8 @@ impl InteractiveMode {
                         thinking_selected,
                         thinking_level,
                     )
+                } else if display_mode == DisplayMode::SessionList {
+                    render_session_list(&session_list, session_list_selected)
                 } else if autocomplete_active {
                     render_autocomplete_dropdown(
                         autocomplete_kind,
@@ -2953,6 +3170,183 @@ fn render_settings_list(
 }
 
 // ----- LoginRow + build/render helpers + tree rows + thinking list + export
+
+/// One row rendered in the `/resume` session picker overlay.
+#[derive(Clone, Debug)]
+pub struct SessionBrowserRow {
+    pub id: String,
+    pub model: String,
+    pub message_count: usize,
+    pub updated_at: String,
+    pub file_path: PathBuf,
+}
+
+fn build_session_rows(
+    manager: &pi_core::session::SessionManager,
+) -> Vec<SessionBrowserRow> {
+    manager
+        .list_with_paths()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(m, p)| SessionBrowserRow {
+            id: p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            model: m.model,
+            message_count: m.message_count,
+            updated_at: m.updated_at,
+            file_path: p,
+        })
+        .collect()
+}
+
+fn render_session_list(
+    rows: &[SessionBrowserRow],
+    selected: usize,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Resume session ({} available)", rows.len()),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no saved sessions in this project)".to_string(),
+            dim_style(),
+        )));
+        return (lines, None);
+    }
+    let mut selected_line: Option<usize> = None;
+    for (i, r) in rows.iter().enumerate() {
+        let is_sel = i == selected;
+        if is_sel {
+            selected_line = Some(lines.len());
+        }
+        let prefix = if is_sel { "› " } else { "  " };
+        let id_style = if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let short: String = r.id.chars().take(12).collect();
+        let ts = r
+            .updated_at
+            .split('.')
+            .next()
+            .unwrap_or(&r.updated_at)
+            .replace('T', " ");
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:<14}", short), id_style),
+            Span::raw("  "),
+            Span::styled(format!("{:>4} msgs", r.message_count), muted_style()),
+            Span::raw("  "),
+            Span::styled(ts, dim_style()),
+            Span::raw("  "),
+            Span::styled(r.model.clone(), dim_style()),
+        ]));
+    }
+    (lines, selected_line)
+}
+
+/// Replay a loaded `Session` into the TUI's `ConversationMessage`
+/// vector. We only show user + assistant bubbles — tool messages are
+/// stitched into the assistant bubble on the original turn, so
+/// replaying them separately would duplicate.
+fn session_to_conversation_rows(
+    session: &pi_core::session::Session,
+) -> Vec<ConversationMessage> {
+    let mut rows: Vec<ConversationMessage> = Vec::new();
+    for msg in session.messages() {
+        match msg {
+            pi_ai::types::Message::User(blocks) => {
+                let mut body = String::new();
+                for b in blocks {
+                    if let pi_ai::types::Content::Text { text, .. } = b {
+                        if !body.is_empty() {
+                            body.push('\n');
+                        }
+                        body.push_str(text);
+                    }
+                }
+                if !body.is_empty() {
+                    rows.push(ConversationMessage {
+                        role: "user".to_string(),
+                        content: body,
+                        ..Default::default()
+                    });
+                }
+            }
+            pi_ai::types::Message::Assistant(blocks) => {
+                let mut text_body = String::new();
+                let mut thinking = String::new();
+                let mut tool_calls: Vec<ConversationToolCall> = Vec::new();
+                for b in blocks {
+                    match b {
+                        pi_ai::types::Content::Text { text, .. } => {
+                            if !text_body.is_empty() {
+                                text_body.push('\n');
+                            }
+                            text_body.push_str(text);
+                        }
+                        pi_ai::types::Content::Thinking { thinking: t, .. } => {
+                            if !thinking.is_empty() {
+                                thinking.push('\n');
+                            }
+                            thinking.push_str(t);
+                        }
+                        pi_ai::types::Content::ToolUse { id, name, input, .. } => {
+                            tool_calls.push(ConversationToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input_preview: preview_tool_args(input),
+                                input_raw: Some(input.clone()),
+                                output: None,
+                                is_error: false,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                rows.push(ConversationMessage {
+                    role: "assistant".to_string(),
+                    content: text_body,
+                    thinking,
+                    tool_calls,
+                    streaming: false,
+                });
+            }
+            pi_ai::types::Message::Tool {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
+                if let Some(last) = rows
+                    .iter_mut()
+                    .rev()
+                    .find(|m| m.role == "assistant" && m.tool_calls.iter().any(|c| &c.id == tool_use_id))
+                {
+                    if let Some(call) = last.tool_calls.iter_mut().find(|c| &c.id == tool_use_id) {
+                        let mut body = String::new();
+                        for b in content {
+                            if let pi_ai::types::Content::Text { text, .. } = b {
+                                if !body.is_empty() {
+                                    body.push('\n');
+                                }
+                                body.push_str(text);
+                            }
+                        }
+                        call.output = Some(body);
+                        call.is_error = is_error.unwrap_or(false);
+                    }
+                }
+            }
+        }
+    }
+    rows
+}
 
 #[derive(Clone, Debug)]
 pub struct LoginRow {

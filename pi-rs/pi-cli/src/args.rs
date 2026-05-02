@@ -60,6 +60,16 @@ pub struct Cli {
     /// Session directory
     #[clap(long)]
     pub session_dir: Option<String>,
+
+    /// Resume a saved session. With no argument, opens an interactive
+    /// picker on startup; with an id, loads that specific session.
+    #[clap(long, value_name = "id", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
+    /// Continue the most recently modified session in the current
+    /// working directory. Creates a new session if there are none.
+    #[clap(long = "continue")]
+    pub continue_: bool,
 }
 
 /// Available subcommands.

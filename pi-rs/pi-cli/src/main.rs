@@ -316,8 +316,104 @@ async fn main() -> anyhow::Result<()> {
                     .with_tool(Box::new(LsTool));
             }
 
+            // Resolve a resume target if the user asked for one. We
+            // accept three shapes:
+            //   --continue               -> newest saved session (or new)
+            //   --resume <id>            -> specific saved session
+            //   --resume                 -> newest session (no picker CLI yet)
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let resume_session: Option<pi_core::session::Session> = if cli.continue_ {
+                match pi_core::session::SessionManager::for_cwd(&cwd) {
+                    Ok(mgr) => match mgr.most_recent() {
+                        Ok(Some(path)) => match mgr.open_path(&path) {
+                            Ok(s) => {
+                                info!(
+                                    "Continuing session {} ({} messages)",
+                                    s.id(),
+                                    s.messages().len()
+                                );
+                                Some(s)
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: --continue failed to open {e}; starting fresh");
+                                None
+                            }
+                        },
+                        Ok(None) => None,
+                        Err(e) => {
+                            eprintln!("Warning: --continue scan failed: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Warning: session dir unavailable: {e}");
+                        None
+                    }
+                }
+            } else if let Some(resume_arg) = cli.resume.clone() {
+                match pi_core::session::SessionManager::for_cwd(&cwd) {
+                    Ok(mgr) => {
+                        let resolved = if resume_arg.is_empty() {
+                            mgr.most_recent().ok().flatten()
+                        } else {
+                            // Allow either a bare id (no extension) or a
+                            // full path. If bare, look for <id>.jsonl in
+                            // the session dir.
+                            let direct = std::path::PathBuf::from(&resume_arg);
+                            if direct.is_file() {
+                                Some(direct)
+                            } else {
+                                Some(mgr.dir().join(format!("{resume_arg}.jsonl")))
+                            }
+                        };
+                        match resolved {
+                            Some(path) if path.exists() => match mgr.open_path(&path) {
+                                Ok(s) => {
+                                    info!(
+                                        "Resuming session {} ({} messages)",
+                                        s.id(),
+                                        s.messages().len()
+                                    );
+                                    Some(s)
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: --resume failed to open {e}");
+                                    None
+                                }
+                            },
+                            _ => {
+                                if !resume_arg.is_empty() {
+                                    eprintln!(
+                                        "Warning: no session matching '{resume_arg}' in {}",
+                                        mgr.dir().display()
+                                    );
+                                }
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: session dir unavailable: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // If we're resuming, align the agent with the saved
+            // session's model + message history so the first follow-up
+            // turn sees the full prior conversation.
+            if let Some(session) = resume_session.as_ref() {
+                let saved_model = session.metadata().model.clone();
+                if !saved_model.is_empty() {
+                    let _ = agent.set_model(&saved_model);
+                }
+                agent.set_messages(session.messages().to_vec());
+            }
+
             // Launch interactive mode
-            match InteractiveMode::new(agent) {
+            match InteractiveMode::new_with_session(agent, resume_session) {
                 Ok(mut mode) => {
                     if let Err(e) = mode.run().await {
                         eprintln!("Interactive mode error: {}", e);

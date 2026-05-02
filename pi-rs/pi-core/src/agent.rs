@@ -567,8 +567,17 @@ impl Agent {
     }
 
     /// Get conversation history.
+    /// Read-only view of all messages accumulated so far.
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Replace the accumulated messages with an arbitrary history.
+    /// Used by the TUI to resume a saved session: we hydrate the
+    /// agent's context from the on-disk JSONL transcript so the very
+    /// next turn sees the full prior conversation.
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
     }
 
     /// Get tool count for testing.

@@ -233,6 +233,32 @@ impl Session {
         self.metadata.updated_at = chrono::Utc::now().to_rfc3339();
     }
 
+    /// Full path to the JSONL file backing this session (None until
+    /// `save()` or `append_entry()` is first called with a backing
+    /// path in place).
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
+    }
+
+    /// Metadata snapshot (message count, model, cwd, updated_at).
+    pub fn metadata(&self) -> &SessionMetadata {
+        &self.metadata
+    }
+
+    /// All raw entries (messages, model changes, compactions, etc.)
+    /// in file order. Lets the TUI replay events verbatim when
+    /// resuming.
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.entries
+    }
+
+    /// Attach a file path without rewriting. Used when hydrating an
+    /// existing session on `/resume` so subsequent `append_entry()`
+    /// calls land in the same file.
+    pub fn set_file_path(&mut self, path: PathBuf) {
+        self.file_path = Some(path);
+    }
+
     /// Save session to JSONL file
     pub fn save(&mut self, path: &Path) -> Result<()> {
         // Create parent directories
@@ -347,10 +373,87 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new session manager
+    /// Create a new session manager rooted at an arbitrary directory.
     pub fn new(sessions_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&sessions_dir)?;
         Ok(Self { sessions_dir })
+    }
+
+    /// Create a session manager rooted at the default per-cwd location:
+    ///
+    ///   ~/.pi/sessions/--<encoded-cwd>--/
+    ///
+    /// Matches the TypeScript pi layout so each project's sessions are
+    /// isolated by working directory. The encoded form replaces path
+    /// separators + colons with `-` and wraps the result in `--...--`
+    /// for easy recognition in `ls` output.
+    pub fn for_cwd(cwd: &Path) -> Result<Self> {
+        let base = default_agent_dir();
+        let encoded = encode_cwd(cwd);
+        let dir = base.join("sessions").join(encoded);
+        Self::new(dir)
+    }
+
+    /// Find the most recently-modified `.jsonl` session file in the
+    /// manager's directory. `None` if there are no sessions yet.
+    pub fn most_recent(&self) -> Result<Option<PathBuf>> {
+        if !self.sessions_dir.exists() {
+            return Ok(None);
+        }
+        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+        for entry in fs::read_dir(&self.sessions_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = entry
+                .metadata()?
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH);
+            match &best {
+                Some((t, _)) if *t >= mtime => {}
+                _ => best = Some((mtime, path)),
+            }
+        }
+        Ok(best.map(|(_, p)| p))
+    }
+
+    /// Open a session by file path. Preserves any existing entries and
+    /// wires `set_file_path` so subsequent `append_entry` calls go to
+    /// the same file.
+    pub fn open_path(&self, path: &Path) -> Result<Session> {
+        let mut session = Session::load(path)?;
+        session.set_file_path(path.to_path_buf());
+        Ok(session)
+    }
+
+    /// Continue the most recent session in this directory; if there
+    /// is none, create a fresh session. The returned session already
+    /// has its file path set so `append_entry` persists changes.
+    pub fn continue_recent(&self, model: &str, cwd: &str) -> Result<Session> {
+        match self.most_recent()? {
+            Some(path) => self.open_path(&path),
+            None => {
+                let mut session = Session::new(model, cwd);
+                let filename = format!("{}.jsonl", session.id.as_str());
+                let path = self.sessions_dir.join(filename);
+                session.save(&path)?;
+                Ok(session)
+            }
+        }
+    }
+
+    /// Create a new session, save its header to disk immediately, and
+    /// return it. Used by the interactive TUI so the session file
+    /// exists as soon as the user opens pi — append-on-turn then
+    /// flows through the same file.
+    pub fn create_on_disk(&self, model: &str, cwd: &str) -> Result<Session> {
+        let mut session = Session::new(model, cwd);
+        let filename = format!("{}.jsonl", session.id.as_str());
+        let path = self.sessions_dir.join(filename);
+        session.save(&path)?;
+        Ok(session)
     }
 
     /// Create a new session and optionally save it
@@ -372,7 +475,7 @@ impl SessionManager {
     /// Load a session from file
     pub fn load(&self, name: &str) -> Result<Session> {
         let path = self.sessions_dir.join(format!("{}.jsonl", name));
-        Session::load(&path)
+        self.open_path(&path)
     }
 
     /// Load a session by ID
@@ -380,30 +483,36 @@ impl SessionManager {
         self.load(id.as_str())
     }
 
-    /// List all available sessions
-    pub fn list(&self) -> Result<Vec<SessionMetadata>> {
-        let mut sessions = Vec::new();
-
+    /// List all available sessions as `(metadata, file_path)` pairs,
+    /// newest first by last-modified time. Malformed files are
+    /// silently skipped so one bad session never blocks the picker.
+    pub fn list_with_paths(&self) -> Result<Vec<(SessionMetadata, PathBuf)>> {
+        let mut sessions: Vec<(SessionMetadata, PathBuf, std::time::SystemTime)> = Vec::new();
         if !self.sessions_dir.exists() {
-            return Ok(sessions);
+            return Ok(Vec::new());
         }
-
         for entry in fs::read_dir(&self.sessions_dir)? {
             let entry = entry?;
             let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                match Session::load(&path) {
-                    Ok(session) => sessions.push(session.metadata),
-                    Err(e) => eprintln!("Failed to load session {:?}: {}", path, e),
-                }
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            match Session::load(&path) {
+                Ok(session) => sessions.push((session.metadata, path, mtime)),
+                Err(e) => eprintln!("Failed to load session {:?}: {}", path, e),
             }
         }
+        sessions.sort_by(|a, b| b.2.cmp(&a.2));
+        Ok(sessions.into_iter().map(|(m, p, _)| (m, p)).collect())
+    }
 
-        // Sort by creation time (newest first)
-        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-
-        Ok(sessions)
+    /// List all available sessions (metadata only, newest first).
+    pub fn list(&self) -> Result<Vec<SessionMetadata>> {
+        Ok(self.list_with_paths()?.into_iter().map(|(m, _)| m).collect())
     }
 
     /// Delete a session
@@ -417,6 +526,31 @@ impl SessionManager {
     pub fn dir(&self) -> &Path {
         &self.sessions_dir
     }
+}
+
+/// Default root for pi's agent data: `~/.pi` (unix) or
+/// `%LOCALAPPDATA%\pi` (windows). Mirrors TS's `getDefaultAgentDir`.
+pub fn default_agent_dir() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".pi");
+    }
+    PathBuf::from(".pi")
+}
+
+/// Encode a working directory to a filesystem-safe segment. Matches
+/// the TypeScript encoder (`--<path-with-separators-replaced>--`) so
+/// sessions stay comparable across implementations.
+pub fn encode_cwd(cwd: &Path) -> String {
+    let raw = cwd.to_string_lossy();
+    let trimmed = raw.trim_start_matches('/').trim_start_matches('\\');
+    let safe: String = trimmed
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            _ => c,
+        })
+        .collect();
+    format!("--{safe}--")
 }
 
 #[cfg(test)]
@@ -551,5 +685,44 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn encode_cwd_matches_expected_shape() {
+        let p = PathBuf::from("/Users/me/projects/pi");
+        assert_eq!(encode_cwd(&p), "--Users-me-projects-pi--");
+    }
+
+    #[test]
+    fn continue_recent_falls_back_to_new_when_dir_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let sess = mgr.continue_recent("m", "/tmp").unwrap();
+        assert!(sess.file_path().is_some());
+        assert_eq!(sess.messages().len(), 0);
+    }
+
+    #[test]
+    fn continue_recent_picks_newest_file() {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let s_old = mgr.create_on_disk("m1", "/a").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let s_new = mgr.create_on_disk("m2", "/a").unwrap();
+        let resumed = mgr.continue_recent("fallback-model", "/a").unwrap();
+        assert_eq!(resumed.id(), s_new.id());
+        assert_ne!(resumed.id(), s_old.id());
+    }
+
+    #[test]
+    fn list_with_paths_orders_newest_first() {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::new(dir.path().to_path_buf()).unwrap();
+        let _a = mgr.create_on_disk("m", "/a").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let b = mgr.create_on_disk("m", "/a").unwrap();
+        let items = mgr.list_with_paths().unwrap();
+        assert_eq!(items.len(), 2);
+        assert!(items[0].1.file_name().unwrap().to_string_lossy().contains(b.id().as_str()));
     }
 }
