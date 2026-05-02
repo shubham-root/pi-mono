@@ -23,6 +23,9 @@ pi-tui = { path = "../pi-tui" }
 # TUI
 ratatui = { version = "0.27", default-features = false, features = ["crossterm", "serde"] }
 chrono = "0.4"
+pulldown-cmark = { version = "0.10", default-features = false }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+once_cell = "1"
 
 # For print mode
 atty = "0.2"
