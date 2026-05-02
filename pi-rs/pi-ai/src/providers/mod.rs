@@ -12,6 +12,7 @@ pub mod openrouter;
 pub mod vercel;
 pub mod bedrock;
 pub mod sigv4;
+pub mod eventstream;
 pub mod multimodal;
 
 /// Stream from the appropriate provider.

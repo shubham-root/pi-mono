@@ -373,7 +373,7 @@ fn build_request(
         .as_deref()
         .unwrap_or(&default_host)
         .trim_end_matches('/');
-    let url = format!("{}/model/{}/converse", base, model.id);
+    let url = format!("{}/model/{}/converse-stream", base, model.id);
 
     let body_bytes = serde_json::to_vec(&body)?;
     Ok((url, body_bytes))
@@ -552,17 +552,233 @@ pub async fn stream(
         return Err(anyhow!("Bedrock API error {status}: {text}"));
     };
 
-    // Converse (non-streaming) returns application/json, not an event
-    // stream. Read the full body and synthesize a token stream from it.
-    let bytes = response.bytes().await?;
-    let parsed: BedrockConverseResponse = serde_json::from_slice(&bytes).map_err(|e| {
-        let preview: String = String::from_utf8_lossy(&bytes).chars().take(256).collect();
-        anyhow!("Bedrock response parse error: {e}. Body starts with: {preview}")
-    })?;
+    // `/converse-stream` returns
+    // `application/vnd.amazon.eventstream` — a binary frame format
+    // where each event is a message with typed headers and a JSON
+    // payload. Decode frames incrementally and map them to
+    // `StreamEvent`s as they arrive so the UI renders tokens in real
+    // time.
+    let byte_stream = response.bytes_stream();
+    let model_id = model.id.clone();
+    let event_stream = build_bedrock_event_stream(byte_stream, model_id);
+    Ok(Box::pin(event_stream) as crate::types::stream::AssistantMessageEventStream)
+}
 
-    let events = response_to_events(parsed, &model.id);
-    let stream_iter = futures::stream::iter(events).boxed();
-    Ok(Box::pin(stream_iter) as crate::types::stream::AssistantMessageEventStream)
+/// Incremental adapter from a byte-stream of event-stream frames to
+/// `StreamEvent`s. Handles the Bedrock-specific set of event types:
+///
+///   * `messageStart`       -> emits `StreamEvent::Start`
+///   * `contentBlockStart`  -> records a new content block (text, tool_use)
+///   * `contentBlockDelta`  -> emits `TextDelta` or accumulates toolUse input
+///   * `contentBlockStop`   -> flushes the tool-use delta if any
+///   * `messageStop`        -> emits `StreamEvent::Stop`
+///   * `metadata`           -> emits `StreamEvent::Usage`
+///
+/// Bedrock streams tool `input` as incremental JSON snippets on each
+/// `contentBlockDelta`. We accumulate them into a single string per
+/// block index and parse once on `contentBlockStop`, then emit a
+/// `ToolCallDelta` that downstream agents consume.
+fn build_bedrock_event_stream(
+    byte_stream: impl futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send + 'static,
+    model_id: String,
+) -> impl futures::Stream<Item = Result<StreamEvent>> + Send {
+    use crate::providers::eventstream::EventStreamDecoder;
+    use futures::stream;
+    use std::collections::HashMap;
+
+    struct State {
+        decoder: EventStreamDecoder,
+        model_id: String,
+        // block_index -> (tool_use_id, name, accumulated_json)
+        tool_blocks: HashMap<u32, (String, String, String)>,
+    }
+    let state = State {
+        decoder: EventStreamDecoder::new(),
+        model_id,
+        tool_blocks: HashMap::new(),
+    };
+
+    // Pin the byte stream before handing it to `unfold` so it can be
+    // polled across await points inside the closure.
+    let byte_stream = Box::pin(byte_stream);
+
+    stream::unfold((byte_stream, state, Vec::<StreamEvent>::new(), false), move |(
+        mut byte_stream,
+        mut state,
+        mut pending,
+        mut done,
+    )| async move {
+        loop {
+            if let Some(ev) = pending.pop() {
+                return Some((Ok(ev), (byte_stream, state, pending, done)));
+            }
+            if done {
+                return None;
+            }
+            // Pull the next complete frame from the decoder; if the
+            // buffer doesn't have one yet, read more bytes from the
+            // network.
+            match state.decoder.next_message() {
+                Err(e) => return Some((Err(e), (byte_stream, state, pending, true))),
+                Ok(Some(msg)) => {
+                    match decode_bedrock_message(&msg, &mut state.tool_blocks, &state.model_id) {
+                        Ok(events) => {
+                            // Reverse so popping yields in order.
+                            pending.extend(events.into_iter().rev());
+                            continue;
+                        }
+                        Err(e) => {
+                            return Some((Err(e), (byte_stream, state, pending, true)));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Need more bytes.
+                    use futures::StreamExt;
+                    match byte_stream.next().await {
+                        Some(Ok(chunk)) => {
+                            state.decoder.push(&chunk);
+                            continue;
+                        }
+                        Some(Err(e)) => {
+                            return Some((
+                                Err(anyhow!("Bedrock body stream error: {e}")),
+                                (byte_stream, state, pending, true),
+                            ));
+                        }
+                        None => {
+                            done = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn decode_bedrock_message(
+    msg: &crate::providers::eventstream::EventStreamMessage,
+    tool_blocks: &mut std::collections::HashMap<u32, (String, String, String)>,
+    model_id: &str,
+) -> Result<Vec<StreamEvent>> {
+    let Some(event_type) = msg.event_type() else {
+        return Ok(Vec::new());
+    };
+    // Some event types that Bedrock returns indicate the overall
+    // model errored (throttling, auth, etc.). The payload is a JSON
+    // object with a `message` field. Surface as an Error event so
+    // the agent loop stops cleanly.
+    match event_type {
+        "messageStart" => Ok(vec![StreamEvent::Start {
+            model: model_id.to_string(),
+            usage: None,
+        }]),
+        "contentBlockStart" => {
+            // JSON: { contentBlockIndex, start: { toolUse: { toolUseId, name } | {} } }
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| anyhow!("decode contentBlockStart: {e}"))?;
+            let idx = v.get("contentBlockIndex").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            if let Some(tu) = v.get("start").and_then(|s| s.get("toolUse")) {
+                let id = tu.get("toolUseId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let name = tu.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                tool_blocks.insert(idx, (id, name, String::new()));
+            }
+            Ok(Vec::new())
+        }
+        "contentBlockDelta" => {
+            // JSON: { contentBlockIndex, delta: { text: "..." } | { toolUse: { input: "<partial json>" } } }
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| anyhow!("decode contentBlockDelta: {e}"))?;
+            let idx = v.get("contentBlockIndex").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let delta = v.get("delta").cloned().unwrap_or(serde_json::Value::Null);
+            if let Some(text) = delta.get("text").and_then(|x| x.as_str()) {
+                if !text.is_empty() {
+                    return Ok(vec![StreamEvent::TextDelta {
+                        delta: text.to_string(),
+                        thinking: None,
+                    }]);
+                }
+            }
+            if let Some(tu) = delta.get("toolUse") {
+                if let Some(snippet) = tu.get("input").and_then(|x| x.as_str()) {
+                    if let Some((_, _, buf)) = tool_blocks.get_mut(&idx) {
+                        buf.push_str(snippet);
+                    }
+                }
+            }
+            Ok(Vec::new())
+        }
+        "contentBlockStop" => {
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| anyhow!("decode contentBlockStop: {e}"))?;
+            let idx = v.get("contentBlockIndex").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            // If this block was a tool_use, flush the accumulated input.
+            if let Some((id, name, buf)) = tool_blocks.remove(&idx) {
+                let input: serde_json::Value = if buf.trim().is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_str(&buf).unwrap_or_else(|_| serde_json::json!({}))
+                };
+                return Ok(vec![StreamEvent::ToolCallDelta {
+                    delta: crate::types::ToolCallDelta {
+                        id: Some(id),
+                        name: Some(name),
+                        input: Some(input),
+                    },
+                }]);
+            }
+            Ok(Vec::new())
+        }
+        "messageStop" => {
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let stop_reason = v
+                .get("stopReason")
+                .and_then(|x| x.as_str())
+                .unwrap_or("end_turn")
+                .to_string();
+            Ok(vec![StreamEvent::Stop {
+                stop_reason,
+                stop_sequence: None,
+            }])
+        }
+        "metadata" => {
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| anyhow!("decode metadata: {e}"))?;
+            let usage = v.get("usage").cloned().unwrap_or(serde_json::Value::Null);
+            let input = usage.get("inputTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let output = usage.get("outputTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let total = usage.get("totalTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            Ok(vec![StreamEvent::Usage {
+                usage: crate::types::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: if total > 0 { Some(total) } else { None },
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    cost: None,
+                },
+            }])
+        }
+        // Error / exception events. Bedrock wraps these in specific
+        // event-types like "validationException", "throttlingException",
+        // "modelStreamErrorException", etc. Surface as Error events.
+        et if et.ends_with("Exception") || et == "internalServerException" => {
+            let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let message = v
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            Ok(vec![StreamEvent::Error {
+                error: format!("Bedrock {et}: {message}"),
+                code: None,
+            }])
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +879,10 @@ mod tests {
         };
 
         let (url, body) = build_request(&model, &ctx, &options).unwrap();
-        assert!(url.ends_with("/converse"), "url should use /converse endpoint, got {url}");
+        assert!(
+            url.ends_with("/converse-stream"),
+            "url should use /converse-stream endpoint, got {url}"
+        );
         assert!(
             url.contains("/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/"),
             "model id should be URL-encoded into the path, got {url}"
