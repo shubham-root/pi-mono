@@ -379,6 +379,22 @@ impl Agent {
             };
 
             let model = resolve_model(&self.model_id)?;
+
+            // Reasoning-capable models (Claude Opus/Sonnet 4.5+,
+            // OpenAI o-series, etc.) increasingly reject the
+            // `temperature` parameter — Bedrock actively 400s with
+            // "temperature is deprecated for this model". Drop it
+            // when the registry flags the model as reasoning-capable
+            // and the caller also set `reasoning_effort`, matching
+            // how TS pi handles the same class of models.
+            let options = if model.reasoning {
+                StreamOptions {
+                    temperature: None,
+                    ..options
+                }
+            } else {
+                options
+            };
             let mut stream = provider_stream(&model, &context, &options).await?;
             // Tell the TUI a new assistant response is starting so it
             // can spin up a fresh placeholder before deltas land. First

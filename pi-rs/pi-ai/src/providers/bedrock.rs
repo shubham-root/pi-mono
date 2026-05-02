@@ -466,84 +466,91 @@ pub async fn stream(
     context: &Context,
     options: &StreamOptions,
 ) -> Result<crate::types::stream::AssistantMessageEventStream> {
-    let (url, body) = build_request(model, context, options)?;
-    let client = Client::new();
+    // Retry loop: some Bedrock-hosted models (notably Claude Opus 4.5+
+    // and Sonnet 4.6+) reject the `temperature` parameter with a
+    // 400 "temperature is deprecated for this model" error. Rather than
+    // maintaining an ever-growing list of models that forbid the param,
+    // we catch the first 400 that names it and retry once without the
+    // parameter. Registry-side we already drop temperature for reasoning
+    // models, so this is a belt-and-suspenders safety net.
+    let mut current_options = options.clone();
+    let response = loop {
+        let (url, body) = build_request(model, context, &current_options)?;
+        let client = Client::new();
 
-    // Auth resolution:
-    //   1. Explicit bearer token via env (AWS_BEARER_TOKEN_BEDROCK) or
-    //      `options.api_key`.
-    //   2. SigV4 with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (optionally
-    //      AWS_SESSION_TOKEN).
-    //
-    // The reference provider also supports assume-role / profile-file
-    // resolution; we delegate those to whatever populated the env (e.g.
-    // `aws-vault exec` or direnv).
-    let bearer = std::env::var("AWS_BEARER_TOKEN_BEDROCK")
-        .ok()
-        .or_else(|| options.api_key.clone());
-
-    let response = if let Some(token) = bearer {
-        client
-            .post(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .body(body)
-            .send()
-            .await?
-    } else {
-        // SigV4 path. Reuse the in-crate signer.
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-            .map_err(|_| anyhow!("Bedrock auth missing: set AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID"))?;
-        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-            .map_err(|_| anyhow!("Bedrock auth missing: AWS_SECRET_ACCESS_KEY not set"))?;
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
-        let region = region_from_env();
-
-        let body_str = std::str::from_utf8(&body)
-            .map_err(|e| anyhow!("Bedrock request body is not UTF-8: {e}"))?;
-        let host = url::Url::parse(&url)
+        let bearer = std::env::var("AWS_BEARER_TOKEN_BEDROCK")
             .ok()
-            .and_then(|u| u.host_str().map(ToString::to_string))
-            .ok_or_else(|| anyhow!("could not parse Bedrock URL host: {url}"))?;
+            .or_else(|| current_options.api_key.clone());
 
-        // Headers that participate in the canonical request. Order doesn't
-        // matter here — the signer sorts internally — but every header we
-        // send on the wire below must appear in this list (plus `host`,
-        // which the signer adds for us).
-        let signing_headers: Vec<(String, String)> = vec![
-            ("host".to_string(), host.clone()),
-            ("content-type".to_string(), "application/json".to_string()),
-            ("accept".to_string(), "application/json".to_string()),
-        ];
+        let response = if let Some(token) = bearer {
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .body(body)
+                .send()
+                .await?
+        } else {
+            // SigV4 path. Reuse the in-crate signer.
+            let access_key = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+                anyhow!("Bedrock auth missing: set AWS_BEARER_TOKEN_BEDROCK or AWS_ACCESS_KEY_ID")
+            })?;
+            let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
+                .map_err(|_| anyhow!("Bedrock auth missing: AWS_SECRET_ACCESS_KEY not set"))?;
+            let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
+            let region = region_from_env();
 
-        let params = sigv4::SigV4Params {
-            access_key,
-            secret_key,
-            session_token,
-            region,
-            service: "bedrock".to_string(),
+            let body_str = std::str::from_utf8(&body)
+                .map_err(|e| anyhow!("Bedrock request body is not UTF-8: {e}"))?;
+            let host = url::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(ToString::to_string))
+                .ok_or_else(|| anyhow!("could not parse Bedrock URL host: {url}"))?;
+
+            let signing_headers: Vec<(String, String)> = vec![
+                ("host".to_string(), host.clone()),
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "application/json".to_string()),
+            ];
+
+            let params = sigv4::SigV4Params {
+                access_key,
+                secret_key,
+                session_token,
+                region,
+                service: "bedrock".to_string(),
+            };
+
+            let signed = sigv4::sign_request("POST", &url, &signing_headers, body_str, &params)?;
+
+            let mut rb = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("X-Amz-Date", signed.x_amz_date)
+                .header("Authorization", signed.authorization_header);
+            if let Some(token) = signed.x_amz_security_token {
+                rb = rb.header("X-Amz-Security-Token", token);
+            }
+            rb.body(body).send().await?
         };
 
-        let signed = sigv4::sign_request("POST", &url, &signing_headers, body_str, &params)?;
-
-        let mut rb = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .header("X-Amz-Date", signed.x_amz_date)
-            .header("Authorization", signed.authorization_header);
-        if let Some(token) = signed.x_amz_security_token {
-            rb = rb.header("X-Amz-Security-Token", token);
+        if response.status().is_success() {
+            break response;
         }
-        rb.body(body).send().await?
-    };
 
-    if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        let temperature_rejected = status.as_u16() == 400
+            && current_options.temperature.is_some()
+            && text.to_lowercase().contains("'temperature'");
+        if temperature_rejected {
+            current_options.temperature = None;
+            continue;
+        }
         return Err(anyhow!("Bedrock API error {status}: {text}"));
-    }
+    };
 
     // Converse (non-streaming) returns application/json, not an event
     // stream. Read the full body and synthesize a token stream from it.
