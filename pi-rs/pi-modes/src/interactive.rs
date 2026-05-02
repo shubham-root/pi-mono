@@ -275,7 +275,21 @@ pub struct InteractiveMode {
     agent: Option<Agent>,
     messages: Vec<ConversationMessage>,
     editor: InputEditor,
+    /// Messages queued by Alt+Enter *when idle* — delivered as a
+    /// fresh prompt on the next turn. When busy, Alt+Enter goes
+    /// directly to `active_job.followup_tx` instead.
     queued_messages: Vec<String>,
+    /// Count of steer submissions this turn (Enter while busy) so the
+    /// hint row can surface "N steering". Reset when the job finishes.
+    pending_steering: usize,
+    /// Count of follow-up submissions this turn (Alt+Enter while busy).
+    pending_followup: usize,
+    /// Index into `self.messages` of the assistant placeholder that
+    /// currently receives streamed deltas. `AgentEvent::AssistantStart`
+    /// moves this forward when a new assistant response begins inside
+    /// the same `prompt_stream` (multi-turn tool loops, or after
+    /// follow-up injection).
+    current_assistant_index: Option<usize>,
     status: String,
     executing: bool,
     show_thinking: bool,
@@ -352,12 +366,28 @@ struct PromptJob {
     started_at: Instant,
     user_message: String,
     /// Index into `messages` of the streaming assistant placeholder for
-    /// this job. We append tokens here as they arrive.
+    /// this job. Updated on `AgentEvent::AssistantStart` when the
+    /// placeholder has already been populated (so multi-turn runs with
+    /// tool calls get a fresh bubble per assistant response).
     assistant_index: usize,
     /// Usage snapshot taken at turn-start so the `LastCallStats` on
     /// completion reflects the delta for this turn (not the whole
     /// session).
     pre_turn_usage: UsageStats,
+    /// Clone of the abort token held by the in-flight agent. The TUI
+    /// cancels this on Escape so the agent loop exits at the next
+    /// check-point (between tool calls or inside a stream).
+    abort_token: pi_ai::types::CancellationToken,
+    /// Sender for Enter-while-busy submissions. The agent drains this
+    /// between tool-call batches and injects each message as a user
+    /// turn in-context so the next assistant stream sees it alongside
+    /// any tool results ("steering").
+    steering_tx: mpsc::UnboundedSender<String>,
+    /// Sender for Alt+Enter-while-busy submissions. The agent drains
+    /// this after the inner loop naturally completes and runs the
+    /// injected messages as fresh user turns inside the same lifecycle
+    /// ("follow-up").
+    followup_tx: mpsc::UnboundedSender<String>,
 }
 
 impl InteractiveMode {
@@ -369,6 +399,9 @@ impl InteractiveMode {
             messages: Vec::new(),
             editor: InputEditor::new(),
             queued_messages: Vec::new(),
+            pending_steering: 0,
+            pending_followup: 0,
+            current_assistant_index: None,
             status: "Ready. Type / for commands, Enter to send, Ctrl+C twice to quit.".to_string(),
             executing: false,
             show_thinking: false,
@@ -559,6 +592,9 @@ impl InteractiveMode {
                     }
                 }
                 self.executing = false;
+                self.current_assistant_index = None;
+                self.pending_steering = 0;
+                self.pending_followup = 0;
 
                 if let Some(next) = self.queued_messages.pop() {
                     self.spawn_prompt(next);
@@ -567,49 +603,127 @@ impl InteractiveMode {
             Err(join_err) => {
                 self.status = format!("Agent task panicked: {}", join_err);
                 self.executing = false;
+                self.current_assistant_index = None;
+                self.pending_steering = 0;
+                self.pending_followup = 0;
             }
         }
     }
 
-    fn handle_agent_event(&mut self, assistant_index: usize, event: AgentEvent) {
+    fn handle_agent_event(&mut self, _assistant_index_hint: usize, event: AgentEvent) {
+        // Route every event to the *current* assistant placeholder.
+        // This may move forward during the run (AssistantStart bumps it
+        // when the prior placeholder is already populated, e.g. after
+        // tool calls completed or a user message was injected).
         match event {
+            AgentEvent::AssistantStart => {
+                // If the current placeholder is pristine, reuse it;
+                // otherwise push a new one. Pristine = empty content,
+                // empty thinking, no tool calls, still streaming.
+                let reuse = match self.current_assistant_index {
+                    Some(i) => match self.messages.get(i) {
+                        Some(msg) => {
+                            msg.role == "assistant"
+                                && msg.content.is_empty()
+                                && msg.thinking.is_empty()
+                                && msg.tool_calls.is_empty()
+                                && msg.streaming
+                        }
+                        None => false,
+                    },
+                    None => false,
+                };
+                if !reuse {
+                    // Close out the previous placeholder if we had one.
+                    if let Some(i) = self.current_assistant_index {
+                        if let Some(msg) = self.messages.get_mut(i) {
+                            msg.streaming = false;
+                        }
+                    }
+                    self.messages.push(ConversationMessage {
+                        role: "assistant".to_string(),
+                        content: String::new(),
+                        thinking: String::new(),
+                        tool_calls: Vec::new(),
+                        streaming: true,
+                        ..Default::default()
+                    });
+                    self.current_assistant_index = Some(self.messages.len() - 1);
+                }
+            }
+            AgentEvent::UserMessage { text } => {
+                // Agent injected a user message mid-run (steering or
+                // follow-up drain). Close the current assistant
+                // placeholder so the user bubble visually separates
+                // from the prior stream, then push the user row. The
+                // next AssistantStart will create a fresh placeholder.
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        msg.streaming = false;
+                    }
+                }
+                // Avoid duplicating the bubble we already pushed when
+                // the user hit Enter/Alt+Enter: if the most recent
+                // message is a user row with matching content, skip.
+                let already_shown = self
+                    .messages
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .any(|m| m.role == "user" && m.content == text);
+                if !already_shown {
+                    self.messages.push(ConversationMessage {
+                        role: "user".to_string(),
+                        content: text,
+                        ..Default::default()
+                    });
+                }
+                self.current_assistant_index = None;
+            }
             AgentEvent::TextDelta { delta } => {
-                if let Some(msg) = self.messages.get_mut(assistant_index) {
-                    msg.content.push_str(&delta);
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        msg.content.push_str(&delta);
+                    }
                 }
             }
             AgentEvent::ThinkingDelta { delta, .. } => {
-                if let Some(msg) = self.messages.get_mut(assistant_index) {
-                    msg.thinking.push_str(&delta);
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        msg.thinking.push_str(&delta);
+                    }
                 }
             }
             AgentEvent::ToolCallStart { id, name, input } => {
-                if let Some(msg) = self.messages.get_mut(assistant_index) {
-                    let preview = preview_tool_args(&input);
-                    msg.tool_calls.push(ConversationToolCall {
-                        id,
-                        name,
-                        input_preview: preview,
-                        input_raw: Some(input),
-                        output: None,
-                        is_error: false,
-                    });
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        let preview = preview_tool_args(&input);
+                        msg.tool_calls.push(ConversationToolCall {
+                            id,
+                            name,
+                            input_preview: preview,
+                            input_raw: Some(input),
+                            output: None,
+                            is_error: false,
+                        });
+                    }
                 }
             }
             AgentEvent::ToolCallResult { id, output, is_error } => {
-                if let Some(msg) = self.messages.get_mut(assistant_index) {
-                    if let Some(call) = msg.tool_calls.iter_mut().find(|c| c.id == id) {
-                        call.output = Some(output);
-                        call.is_error = is_error;
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        if let Some(call) = msg.tool_calls.iter_mut().find(|c| c.id == id) {
+                            call.output = Some(output);
+                            call.is_error = is_error;
+                        }
                     }
                 }
             }
             AgentEvent::Usage(usage) => {
-                // Accumulate totals for the session. Providers emit one
-                // Usage event per turn, so summing input+output from each
-                // is correct. Cache counters come in optional form.
-                self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens as u64);
-                self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens as u64);
+                self.usage.input_tokens =
+                    self.usage.input_tokens.saturating_add(usage.input_tokens as u64);
+                self.usage.output_tokens =
+                    self.usage.output_tokens.saturating_add(usage.output_tokens as u64);
                 if let Some(cr) = usage.cache_read_tokens {
                     self.usage.cache_read_tokens =
                         self.usage.cache_read_tokens.saturating_add(cr as u64);
@@ -618,35 +732,27 @@ impl InteractiveMode {
                     self.usage.cache_write_tokens =
                         self.usage.cache_write_tokens.saturating_add(cw as u64);
                 }
-                // total = input + output + cache_read (cache_read counts
-                // toward the context window at a discount but for UI
-                // purposes we surface the raw sum).
                 self.usage.total_tokens = self.usage.total_tokens.saturating_add(
                     (usage.input_tokens as u64) + (usage.output_tokens as u64),
                 );
             }
-            AgentEvent::TurnComplete { .. } => {
-                // No-op at this layer; Done carries the final_text summary.
-            }
-            AgentEvent::Done { final_text: _ } => {
-                // Finalization happens in the join path where we also
-                // have the agent handle. Nothing to do here; the last
-                // TextDelta already populated content.
-            }
+            AgentEvent::TurnComplete { .. } => {}
+            AgentEvent::Done { final_text: _ } => {}
             AgentEvent::Error { message } => {
-                // Drop the streaming placeholder entirely and push a
-                // dedicated error row so the red-tinted visual kicks in.
-                if let Some(msg) = self.messages.get_mut(assistant_index) {
-                    msg.streaming = false;
-                    if msg.content.is_empty() && msg.tool_calls.is_empty() {
-                        // Swap the blank placeholder in-place so the
-                        // message index tracked by the active job stays
-                        // valid for any late-arriving events.
-                        msg.role = "error".to_string();
-                        msg.content = message.clone();
+                if let Some(i) = self.current_assistant_index {
+                    if let Some(msg) = self.messages.get_mut(i) {
+                        msg.streaming = false;
+                        if msg.content.is_empty() && msg.tool_calls.is_empty() {
+                            msg.role = "error".to_string();
+                            msg.content = message.clone();
+                        } else {
+                            self.messages.push(ConversationMessage {
+                                role: "error".to_string(),
+                                content: message.clone(),
+                                ..Default::default()
+                            });
+                        }
                     } else {
-                        // There was partial output; keep it and append a
-                        // separate error row.
                         self.messages.push(ConversationMessage {
                             role: "error".to_string(),
                             content: message.clone(),
@@ -666,10 +772,13 @@ impl InteractiveMode {
     }
 
     fn spawn_prompt(&mut self, text: String) {
-        if self.active_job.is_some() {
-            self.queued_messages.insert(0, text);
-            return;
-        }
+        // When a turn is already in flight we never kick off a second
+        // one; this path is only ever hit from `poll_active_job` after
+        // the current job has been taken off `self.active_job`, or from
+        // a send while idle. Submits during a live turn are routed
+        // through `queue_for_interrupt` / `queue_for_tail` by the
+        // caller (send_message / Alt+Enter handler).
+        debug_assert!(self.active_job.is_none());
         let Some(mut agent) = self.agent.take() else {
             self.status = "No agent configured".to_string();
             return;
@@ -705,12 +814,26 @@ impl InteractiveMode {
             streaming: true,
         });
         let assistant_index = self.messages.len() - 1;
+        self.current_assistant_index = Some(assistant_index);
 
         let (tx, rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (steering_tx, steering_rx) = mpsc::unbounded_channel::<String>();
+        let (followup_tx, followup_rx) = mpsc::unbounded_channel::<String>();
         let text_for_task = text.clone();
         let started_at = Instant::now();
+        // Install a fresh cancel token so the TUI can interrupt this
+        // particular turn (Escape).
+        let abort_token = pi_ai::types::CancellationToken::new();
+        agent.set_abort_token(abort_token.clone());
         let handle = tokio::spawn(async move {
-            let result = agent.prompt_stream(&text_for_task, tx).await;
+            let result = agent
+                .prompt_stream_with_queues(
+                    &text_for_task,
+                    tx,
+                    Some(steering_rx),
+                    Some(followup_rx),
+                )
+                .await;
             (agent, result)
         });
         self.active_job = Some(PromptJob {
@@ -720,6 +843,9 @@ impl InteractiveMode {
             user_message: text,
             assistant_index,
             pre_turn_usage: self.usage.clone(),
+            abort_token,
+            steering_tx,
+            followup_tx,
         });
         self.executing = true;
         self.status = "Executing...".to_string();
@@ -897,13 +1023,37 @@ impl InteractiveMode {
                 Ok(true)
             }
 
-            // Alt+Enter: queue message
+            // Alt+Enter: queue follow-up. When a turn is live the text
+            // is sent on `followup_tx` so the agent picks it up after
+            // the inner loop naturally completes (all tools done). When
+            // idle, Alt+Enter behaves like Enter and submits
+            // immediately, matching the TypeScript pi editor.
             KeyCommand::AltEnter => {
-                if !self.editor.is_empty() {
-                    self.queued_messages.push(self.editor.text().trim().to_string());
-                    self.status = format!("Queued ({})", self.queued_messages.len());
-                    self.editor.clear();
+                if self.editor.is_empty() {
+                    return Ok(true);
                 }
+                let msg = self.editor.text().trim().to_string();
+                if let Some(job) = self.active_job.as_ref() {
+                    // Push the user bubble into the transcript right
+                    // away so the user sees their submission land, even
+                    // though the agent won't drain the channel until
+                    // the current inner loop finishes.
+                    self.messages.push(ConversationMessage {
+                        role: "user".to_string(),
+                        content: msg.clone(),
+                        ..Default::default()
+                    });
+                    let _ = job.followup_tx.send(msg);
+                    self.pending_followup += 1;
+                    self.status = format!(
+                        "Queued follow-up ({} pending)",
+                        self.pending_followup
+                    );
+                } else {
+                    // Idle: submit as a regular prompt.
+                    self.send_message(&msg);
+                }
+                self.editor.clear();
                 Ok(true)
             }
 
@@ -998,6 +1148,13 @@ impl InteractiveMode {
                     self.login_provider_id = None;
                     self.login_key_input.clear();
                     self.status = "Back to chat".to_string();
+                } else if let Some(job) = self.active_job.as_ref() {
+                    // Agent is running: abort at the next check-point.
+                    // The agent loop drains steering/follow-up queues
+                    // first, then exits gracefully when the cancel
+                    // token is observed.
+                    job.abort_token.cancel();
+                    self.status = "Interrupting...".to_string();
                 } else if !self.editor.is_empty() {
                     self.editor.clear();
                     self.status = "Input cleared".to_string();
@@ -1551,7 +1708,21 @@ impl InteractiveMode {
             content: text.to_string(),
             ..Default::default()
         });
-        self.spawn_prompt(text.to_string());
+        if let Some(job) = self.active_job.as_ref() {
+            // Agent is already running: route the text into the
+            // steering channel so it's injected between tool calls,
+            // before the next assistant stream. Mirrors TS "steer"
+            // behavior (Enter while streaming). The user bubble is
+            // already in the transcript above.
+            let _ = job.steering_tx.send(text.to_string());
+            self.pending_steering += 1;
+            self.status = format!(
+                "Steering ({} pending)",
+                self.pending_steering
+            );
+        } else {
+            self.spawn_prompt(text.to_string());
+        }
     }
 
     /// Short summary of a tool-call's JSON input for inline display. We
@@ -1577,7 +1748,8 @@ impl InteractiveMode {
         let editor_text = self.editor.text().to_string();
         let selection_byte_range = self.editor.selection_range();
         let status_text = self.status.clone();
-        let queued_count = self.queued_messages.len();
+        let queued_count =
+            self.queued_messages.len() + self.pending_steering + self.pending_followup;
         let executing = self.executing;
         let palette_active = self.palette_active;
         let show_thinking = self.show_thinking;
@@ -2301,7 +2473,7 @@ fn render_messages(
 fn render_hint_line_chat(status: &str, queued: usize) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled("enter".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" send "),
+        Span::raw(" send/steer "),
         Span::styled("\u{00b7}".to_string(), muted_style()),
         Span::raw(" "),
         Span::styled("ctrl+j".to_string(), Style::default().fg(Color::Yellow)),
@@ -2309,15 +2481,15 @@ fn render_hint_line_chat(status: &str, queued: usize) -> Line<'static> {
         Span::styled("\u{00b7}".to_string(), muted_style()),
         Span::raw(" "),
         Span::styled("alt+enter".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" queue "),
+        Span::raw(" follow-up "),
+        Span::styled("\u{00b7}".to_string(), muted_style()),
+        Span::raw(" "),
+        Span::styled("esc".to_string(), Style::default().fg(Color::Yellow)),
+        Span::raw(" interrupt "),
         Span::styled("\u{00b7}".to_string(), muted_style()),
         Span::raw(" "),
         Span::styled("/".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" commands "),
-        Span::styled("\u{00b7}".to_string(), muted_style()),
-        Span::raw(" "),
-        Span::styled("ctrl+l".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" model"),
+        Span::raw(" commands"),
     ];
     if queued > 0 {
         spans.push(Span::styled("   ".to_string(), muted_style()));

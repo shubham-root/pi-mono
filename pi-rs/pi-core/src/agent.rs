@@ -47,6 +47,16 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// A user message that the agent injected mid-run (steering or
+    /// follow-up). The TUI uses this to render the user-authored text
+    /// between assistant turns.
+    UserMessage {
+        text: String,
+    },
+    /// Emitted at the start of each assistant stream inside the inner
+    /// loop so the TUI can spin up a fresh assistant placeholder before
+    /// TextDeltas start arriving.
+    AssistantStart,
     Usage(Usage),
     /// The provider completed an assistant turn. If `has_tool_calls` is
     /// true, the agent will loop and emit another set of deltas as the
@@ -174,6 +184,15 @@ impl Agent {
         self.thinking_level = level;
     }
 
+    /// Install an abort token so the caller can cancel an in-flight
+    /// `prompt_stream` mid-turn. The agent already consults the token
+    /// on every streaming chunk via `StreamOptions::signal`; we also
+    /// check it at tool-boundary in the outer loop so a cancel between
+    /// tool calls exits cleanly without sending the next request.
+    pub fn set_abort_token(&mut self, token: pi_ai::types::CancellationToken) {
+        self.abort = Some(token);
+    }
+
     pub fn thinking_budgets(&self) -> Option<&pi_ai::types::ThinkingBudgets> {
         self.thinking_budgets.as_ref()
     }
@@ -265,6 +284,29 @@ impl Agent {
         content: &str,
         tx: mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<()> {
+        self.prompt_stream_with_queues(content, tx, None, None).await
+    }
+
+    /// Like [`Self::prompt_stream`] but lets the caller inject user
+    /// messages while the run is in flight:
+    ///
+    /// * `steering_rx` — messages that are merged into context between
+    ///   tool-call batches (before the next assistant stream). Mirrors
+    ///   the TypeScript agent's "steer" behavior: used for Enter-while-
+    ///   streaming.
+    /// * `followup_rx` — messages that are injected after the inner
+    ///   loop would naturally stop, causing the agent to keep running
+    ///   and process them as a fresh user turn. Mirrors "follow-up":
+    ///   used for Alt+Enter-while-streaming.
+    ///
+    /// Both are optional so the old signature keeps working.
+    pub async fn prompt_stream_with_queues(
+        &mut self,
+        content: &str,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+        steering_rx: Option<mpsc::UnboundedReceiver<String>>,
+        followup_rx: Option<mpsc::UnboundedReceiver<String>>,
+    ) -> Result<()> {
         // Append user message. A bail-out below (e.g. max-turns) still
         // leaves this in history so the session transcript stays
         // consistent with what the user typed.
@@ -273,7 +315,12 @@ impl Agent {
             cache_control: None,
         }]));
 
-        match self.prompt_stream_inner(&tx).await {
+        let mut steering_rx = steering_rx;
+        let mut followup_rx = followup_rx;
+        match self
+            .prompt_stream_inner_with_queues(&tx, &mut steering_rx, &mut followup_rx)
+            .await
+        {
             Ok(final_text) => {
                 let _ = tx.send(AgentEvent::Done { final_text });
                 Ok(())
@@ -287,14 +334,20 @@ impl Agent {
         }
     }
 
-    async fn prompt_stream_inner(
+    async fn prompt_stream_inner_with_queues(
         &mut self,
         tx: &mpsc::UnboundedSender<AgentEvent>,
+        steering_rx: &mut Option<mpsc::UnboundedReceiver<String>>,
+        followup_rx: &mut Option<mpsc::UnboundedReceiver<String>>,
     ) -> Result<String> {
-        let mut final_response_text = String::new();
-        let mut turn_count = 0;
+        // Outer loop: wraps the tool-loop so we can restart after
+        // draining the follow-up queue (Alt+Enter messages) without
+        // recursing into another async call.
+        'followup: loop {
+            let mut final_response_text = String::new();
+            let mut turn_count = 0;
 
-        loop {
+            loop {
             if turn_count >= self.config.max_turns {
                 return Err(anyhow!("Max turns ({}) exceeded", self.config.max_turns));
             }
@@ -327,6 +380,12 @@ impl Agent {
 
             let model = resolve_model(&self.model_id)?;
             let mut stream = provider_stream(&model, &context, &options).await?;
+            // Tell the TUI a new assistant response is starting so it
+            // can spin up a fresh placeholder before deltas land. First
+            // call per `prompt_stream` is redundant (the TUI pre-adds a
+            // placeholder) but cheap; mid-loop restarts after steering/
+            // follow-up need it.
+            let _ = tx.send(AgentEvent::AssistantStart);
 
             let mut content_blocks: Vec<Content> = Vec::new();
             let mut current_text = String::new();
@@ -447,9 +506,57 @@ impl Agent {
                     is_error: Some(is_error),
                 });
             }
+
+            // Between tool-call batches, drain any steering messages the
+            // caller queued while we were running. They're pushed into
+            // the agent's context as plain user messages so the next
+            // assistant stream sees them alongside the tool results and
+            // can `steer` the trajectory. Mirrors the TS agent-loop's
+            // `getSteeringMessages()` call.
+            if let Some(rx) = steering_rx.as_mut() {
+                while let Ok(text) = rx.try_recv() {
+                    let _ = tx.send(AgentEvent::UserMessage { text: text.clone() });
+                    self.messages.push(Message::User(vec![Content::Text {
+                        text,
+                        cache_control: None,
+                    }]));
+                }
+            }
+
+            // Escape-to-abort path. The steering channel above already
+            // drained any user-requested redirections; if the caller
+            // *also* cancelled the run, exit cleanly.
+            if let Some(token) = &self.abort {
+                if token.is_cancelled() {
+                    final_response_text = current_text;
+                    break;
+                }
+            }
         }
 
-        Ok(final_response_text)
+        // Inner loop reached the natural stop point (agent had no more
+        // tool calls). Check the follow-up queue: if the caller pushed
+        // any messages via Alt+Enter while we were running, inject them
+        // as user messages and keep the outer lifecycle going.
+        if let Some(rx) = followup_rx.as_mut() {
+            let mut followups: Vec<String> = Vec::new();
+            while let Ok(text) = rx.try_recv() {
+                followups.push(text);
+            }
+            if !followups.is_empty() {
+                for text in followups {
+                    let _ = tx.send(AgentEvent::UserMessage { text: text.clone() });
+                    self.messages.push(Message::User(vec![Content::Text {
+                        text,
+                        cache_control: None,
+                    }]));
+                }
+                continue 'followup;
+            }
+        }
+
+        return Ok(final_response_text);
+        }
     }
 
     /// Abort current operation.
