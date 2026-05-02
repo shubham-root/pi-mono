@@ -8,6 +8,7 @@
 //! - Ctrl+C to clear, Ctrl+C twice to quit
 //! - / to open command palette
 
+use crate::editor::InputEditor;
 use anyhow::Result;
 use pi_core::model_registry::ModelRegistry;
 use pi_core::Agent;
@@ -170,7 +171,7 @@ pub struct InteractiveMode {
     event_loop: EventLoop,
     agent: Option<Agent>,
     messages: Vec<ConversationMessage>,
-    input_text: String,
+    editor: InputEditor,
     queued_messages: Vec<String>,
     status: String,
     executing: bool,
@@ -227,7 +228,7 @@ impl InteractiveMode {
             event_loop,
             agent: Some(agent),
             messages: Vec::new(),
-            input_text: String::new(),
+            editor: InputEditor::new(),
             queued_messages: Vec::new(),
             status: "Ready. Type / for commands, Enter to send, Ctrl+C twice to quit.".to_string(),
             executing: false,
@@ -518,7 +519,7 @@ impl InteractiveMode {
                         let cmd_name = self.palette_items[self.palette_selected].name.clone();
                         self.close_palette();
                         self.execute_command(&cmd_name).await?;
-                        self.input_text.clear();
+                        self.editor.clear();
                     }
                 } else if self.display_mode == DisplayMode::ModelList {
                     // Select model: swap the agent's model + api key to match
@@ -584,26 +585,26 @@ impl InteractiveMode {
                         self.status = format!("Setting: {} = {}", s.name, s.current);
                         self.display_mode = DisplayMode::Chat;
                     }
-                } else if !self.input_text.is_empty() {
+                } else if !self.editor.is_empty() {
                     // Send message
-                    let msg = self.input_text.trim().to_string();
+                    let msg = self.editor.text().trim().to_string();
                     if msg.starts_with('/') {
                         let cmd_name = msg.trim_start_matches('/').to_string();
                         self.execute_command(&cmd_name).await?;
                     } else {
                         self.send_message(&msg);
                     }
-                    self.input_text.clear();
+                    self.editor.clear();
                 }
                 Ok(true)
             }
 
             // Alt+Enter: queue message
             KeyCommand::AltEnter => {
-                if !self.input_text.is_empty() {
-                    self.queued_messages.push(self.input_text.trim().to_string());
+                if !self.editor.is_empty() {
+                    self.queued_messages.push(self.editor.text().trim().to_string());
                     self.status = format!("Queued ({})", self.queued_messages.len());
-                    self.input_text.clear();
+                    self.editor.clear();
                 }
                 Ok(true)
             }
@@ -614,8 +615,8 @@ impl InteractiveMode {
                 if self.ctrl_c_count >= 2 {
                     return Ok(false);
                 }
-                if !self.input_text.is_empty() {
-                    self.input_text.clear();
+                if !self.editor.is_empty() {
+                    self.editor.clear();
                     self.close_palette();
                 }
                 self.status = "Press Ctrl+C again to quit".to_string();
@@ -627,14 +628,14 @@ impl InteractiveMode {
                 self.ctrl_c_count = 0;
                 if self.palette_active {
                     self.close_palette();
-                    self.input_text.clear();
+                    self.editor.clear();
                     self.status = "Palette closed".to_string();
                 } else if self.display_mode != DisplayMode::Chat {
                     self.display_mode = DisplayMode::Chat;
                     self.model_filter.clear();
                     self.status = "Back to chat".to_string();
-                } else if !self.input_text.is_empty() {
-                    self.input_text.clear();
+                } else if !self.editor.is_empty() {
+                    self.editor.clear();
                     self.status = "Input cleared".to_string();
                 }
                 Ok(true)
@@ -653,17 +654,17 @@ impl InteractiveMode {
                     return Ok(true);
                 }
 
-                self.input_text.push(c);
+                self.editor.insert_char(c);
 
                 // Activate palette on first /
-                if self.input_text == "/" {
+                if self.editor.text() == "/" {
                     self.palette_active = true;
                     self.palette_items = self.all_commands.clone();
                     self.palette_selected = 0;
                     self.status = "Type to filter commands, \u{2191}\u{2193} to navigate, Enter to select".to_string();
-                } else if self.palette_active && self.input_text.starts_with('/') {
+                } else if self.palette_active && self.editor.text().starts_with('/') {
                     // Filter as user types
-                    let query = &self.input_text[1..];
+                    let query = &self.editor.text()[1..];
                     self.palette_items = filter_commands(query, &self.all_commands);
                     self.palette_selected = 0;
                 }
@@ -683,18 +684,24 @@ impl InteractiveMode {
                     return Ok(true);
                 }
 
-                self.input_text.pop();
+                self.editor.backspace();
                 if self.palette_active {
-                    if self.input_text.is_empty() {
+                    if self.editor.is_empty() {
                         self.close_palette();
-                    } else if self.input_text.starts_with('/') {
-                        let query = &self.input_text[1..];
+                    } else if self.editor.text().starts_with('/') {
+                        let query = &self.editor.text()[1..];
                         self.palette_items = filter_commands(query, &self.all_commands);
                         self.palette_selected = 0;
                     } else {
                         self.close_palette();
                     }
                 }
+                Ok(true)
+            }
+
+            // Forward-delete (Del key)
+            KeyCommand::Delete => {
+                self.editor.delete_forward();
                 Ok(true)
             }
 
@@ -732,7 +739,8 @@ impl InteractiveMode {
             KeyCommand::Tab => {
                 if self.palette_active && !self.palette_items.is_empty() {
                     let cmd_name = self.palette_items[self.palette_selected].name.clone();
-                    self.input_text = format!("/{}", cmd_name);
+                    self.editor.clear();
+                    self.editor.insert_str(&format!("/{}", cmd_name));
                     self.close_palette();
                 }
                 Ok(true)
@@ -753,6 +761,64 @@ impl InteractiveMode {
             // Model selector shortcut
             KeyCommand::CtrlL => {
                 self.execute_command("model").await?;
+                Ok(true)
+            }
+
+            // ---------- Editor cursor movement ----------
+            KeyCommand::ArrowLeft => {
+                self.editor.move_left();
+                Ok(true)
+            }
+            KeyCommand::ArrowRight => {
+                self.editor.move_right();
+                Ok(true)
+            }
+            KeyCommand::Home | KeyCommand::CtrlA => {
+                self.editor.move_line_start();
+                Ok(true)
+            }
+            KeyCommand::End | KeyCommand::CtrlE => {
+                self.editor.move_line_end();
+                Ok(true)
+            }
+            KeyCommand::AltB => {
+                self.editor.move_word_left();
+                Ok(true)
+            }
+            KeyCommand::AltF => {
+                self.editor.move_word_right();
+                Ok(true)
+            }
+
+            // ---------- Editor kill/yank ----------
+            KeyCommand::CtrlW => {
+                self.editor.kill_word_back();
+                Ok(true)
+            }
+            KeyCommand::AltD => {
+                self.editor.kill_word_forward();
+                Ok(true)
+            }
+            KeyCommand::CtrlK => {
+                self.editor.kill_to_line_end();
+                Ok(true)
+            }
+            KeyCommand::CtrlU => {
+                self.editor.kill_to_line_start();
+                Ok(true)
+            }
+            KeyCommand::CtrlY => {
+                self.editor.yank();
+                Ok(true)
+            }
+
+            // ---------- Undo / redo ----------
+            KeyCommand::CtrlZ => {
+                self.editor.undo();
+                Ok(true)
+            }
+            KeyCommand::AltZ => {
+                self.editor.redo();
                 Ok(true)
             }
 
@@ -849,7 +915,8 @@ impl InteractiveMode {
     fn draw(&mut self) -> Result<()> {
         // Snapshot state for the ratatui closure.
         let messages = self.messages.clone();
-        let input_text = self.input_text.clone();
+        let input_lines = self.editor.visual_lines();
+        let (cursor_row, cursor_col) = self.editor.cursor_line_col();
         let status_text = self.status.clone();
         let queued_count = self.queued_messages.len();
         let executing = self.executing;
@@ -908,9 +975,8 @@ impl InteractiveMode {
             let hint_row = size.height - 3;
 
             // -------- Editor: 1-N rows above the hint row --------
-            let editor_lines: Vec<&str> =
-                if input_text.is_empty() { vec![""] } else { input_text.split('\n').collect() };
-            let editor_height = (editor_lines.len() as u16).clamp(1, 6);
+            let editor_lines_src: Vec<String> = input_lines.clone();
+            let editor_height = (editor_lines_src.len() as u16).clamp(1, 6);
             let editor_top = hint_row.saturating_sub(editor_height);
 
             // -------- Overlay area above editor (command palette / model
@@ -990,7 +1056,7 @@ impl InteractiveMode {
                 width: size.width,
                 height: editor_height,
             };
-            let editor_lines_rendered: Vec<Line> = editor_lines
+            let editor_lines_rendered: Vec<Line> = editor_lines_src
                 .iter()
                 .enumerate()
                 .map(|(i, line)| {
@@ -1003,7 +1069,39 @@ impl InteractiveMode {
                     } else {
                         Span::styled("  ", Style::default())
                     };
-                    Line::from(vec![prompt, Span::raw((*line).to_string())])
+                    // Slice the line at the cursor column and render the
+                    // cell under the cursor with an inverted style so the
+                    // user sees where edits will land. Only do this on
+                    // the row that actually holds the cursor and only when
+                    // overlays/lists aren't taking focus.
+                    let cursor_here = i == cursor_row && !overlay_active;
+                    if cursor_here {
+                        let mut before = String::new();
+                        let mut under = String::from(" ");
+                        let mut after = String::new();
+                        let mut seen = 0usize;
+                        for (_, ch) in line.char_indices() {
+                            if seen < cursor_col {
+                                before.push(ch);
+                            } else if seen == cursor_col {
+                                under = ch.to_string();
+                            } else {
+                                after.push(ch);
+                            }
+                            seen += 1;
+                        }
+                        Line::from(vec![
+                            prompt,
+                            Span::raw(before),
+                            Span::styled(
+                                under,
+                                Style::default().bg(Color::Gray).fg(Color::Black),
+                            ),
+                            Span::raw(after),
+                        ])
+                    } else {
+                        Line::from(vec![prompt, Span::raw(line.clone())])
+                    }
                 })
                 .collect();
             let editor = Paragraph::new(editor_lines_rendered).wrap(Wrap { trim: false });

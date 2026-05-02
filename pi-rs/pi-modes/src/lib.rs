@@ -10,6 +10,7 @@ pub mod rpc;
 pub mod session_picker;
 pub mod settings_ui;
 pub mod markdown;
+pub mod editor;
 
 pub use print::PrintMode;
 pub use interactive::InteractiveMode;
