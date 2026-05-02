@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 pub enum TriggerKind {
     File,
     Bash,
+    Session,
 }
 
 impl TriggerKind {
@@ -26,6 +27,7 @@ impl TriggerKind {
         match c {
             '@' => Some(Self::File),
             '!' => Some(Self::Bash),
+            '#' => Some(Self::Session),
             _ => None,
         }
     }
@@ -99,6 +101,40 @@ pub fn scan_file_completions(fragment: &str, cwd: &Path, limit: usize) -> Vec<Su
         out.push(Suggestion { label, insert });
     }
     out
+}
+
+/// Scan `~/.pi/sessions/*.json` for session file basenames matching
+/// the `fragment`. The basename (minus `.json` extension) is the id
+/// surfaced to the user.
+pub fn scan_session_completions(fragment: &str, sessions_dir: &Path, limit: usize) -> Vec<Suggestion> {
+    let Ok(reader) = std::fs::read_dir(sessions_dir) else {
+        return Vec::new();
+    };
+    let frag_lower = fragment.to_lowercase();
+    let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
+    for entry in reader.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if !stem.to_lowercase().contains(&frag_lower) {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        hits.push((stem.to_string(), mtime));
+    }
+    // Newest first.
+    hits.sort_by(|a, b| b.1.cmp(&a.1));
+    hits.into_iter()
+        .take(limit)
+        .map(|(stem, _)| Suggestion {
+            label: stem.clone(),
+            insert: format!("#{stem}"),
+        })
+        .collect()
 }
 
 /// Scan `$PATH` for executables whose name contains the `fragment`
@@ -287,5 +323,20 @@ mod tests {
         let out = scan_file_completions("src/", dir.path(), 10);
         assert!(out.iter().any(|s| s.label == "main.rs"));
         assert!(out.iter().any(|s| s.insert == "@src/main.rs"));
+    }
+
+    #[test]
+    fn session_scan_finds_matching_ids_and_sorts_newest_first() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("fork-a.json"), "{}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(dir.path().join("fork-b.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "skip").unwrap();
+        let out = scan_session_completions("", dir.path(), 10);
+        let labels: Vec<&str> = out.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["fork-b", "fork-a"]);
+        let filtered = scan_session_completions("-a", dir.path(), 10);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].insert, "#fork-a");
     }
 }

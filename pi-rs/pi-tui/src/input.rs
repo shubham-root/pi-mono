@@ -102,6 +102,10 @@ pub enum KeyCommand {
     ShiftPageUp,
     ShiftPageDown,
     ShiftCtrlP,
+    ShiftArrowLeft,
+    ShiftArrowRight,
+    ShiftArrowUp,
+    ShiftArrowDown,
 
     // Other
     Unknown,
@@ -127,6 +131,14 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
         (KeyCode::Tab, KeyModifiers::NONE) => KeyCommand::Tab,
         (KeyCode::Tab, KeyModifiers::SHIFT) => KeyCommand::ShiftTab,
         (KeyCode::Enter, KeyModifiers::SHIFT) => KeyCommand::ShiftEnter,
+        (KeyCode::Home, KeyModifiers::SHIFT) => KeyCommand::ShiftHome,
+        (KeyCode::End, KeyModifiers::SHIFT) => KeyCommand::ShiftEnd,
+        (KeyCode::PageUp, KeyModifiers::SHIFT) => KeyCommand::ShiftPageUp,
+        (KeyCode::PageDown, KeyModifiers::SHIFT) => KeyCommand::ShiftPageDown,
+        (KeyCode::Left, KeyModifiers::SHIFT) => KeyCommand::ShiftArrowLeft,
+        (KeyCode::Right, KeyModifiers::SHIFT) => KeyCommand::ShiftArrowRight,
+        (KeyCode::Up, KeyModifiers::SHIFT) => KeyCommand::ShiftArrowUp,
+        (KeyCode::Down, KeyModifiers::SHIFT) => KeyCommand::ShiftArrowDown,
         (KeyCode::Esc, _) => KeyCommand::Escape,
 
         // Function keys

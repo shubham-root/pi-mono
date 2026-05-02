@@ -785,10 +785,22 @@ impl InteractiveMode {
                 } else if self.display_mode == DisplayMode::ThinkingList {
                     if let Some(&opt) = self.thinking_options.get(self.thinking_selected) {
                         let level = thinking_level_from_label(opt);
+                        // Map the chosen level to a budget preset so
+                        // Anthropic extended-thinking picks a sensible
+                        // token count automatically.
+                        let budgets = budgets_for_level(opt);
                         if let Some(agent) = self.agent.as_mut() {
                             agent.set_thinking_level(level);
+                            agent.set_thinking_budgets(budgets);
                         }
-                        self.status = format!("Thinking level → {opt}");
+                        self.status = format!(
+                            "Thinking level → {opt}{}",
+                            if budget_hint_for_level(opt).is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({})", budget_hint_for_level(opt))
+                            },
+                        );
                     }
                     self.display_mode = DisplayMode::Chat;
                 } else if self.display_mode == DisplayMode::TreeView {
@@ -818,8 +830,29 @@ impl InteractiveMode {
                 Ok(true)
             }
 
-            // Ctrl+C: clear or quit
+            // Ctrl+C: copy selection, clear, or quit
             KeyCommand::CtrlC => {
+                // If there's an active selection, Ctrl+C copies it to
+                // the system clipboard and does NOT count toward the
+                // double-press quit counter. This matches TS / VSCode /
+                // most terminals where Ctrl+C-on-selection is a copy.
+                if self.editor.has_selection() {
+                    if let Some(text) = self.editor.copy_selection() {
+                        match arboard::Clipboard::new()
+                            .and_then(|mut c| c.set_text(text.clone()))
+                        {
+                            Ok(()) => {
+                                self.status =
+                                    format!("Copied {} chars to clipboard", text.len());
+                            }
+                            Err(e) => {
+                                self.status = format!("Copy failed: {e}");
+                            }
+                        }
+                    }
+                    self.editor.clear_selection();
+                    return Ok(true);
+                }
                 self.ctrl_c_count += 1;
                 if self.ctrl_c_count >= 2 {
                     return Ok(false);
@@ -829,6 +862,44 @@ impl InteractiveMode {
                     self.close_palette();
                 }
                 self.status = "Press Ctrl+C again to quit".to_string();
+                Ok(true)
+            }
+
+            // Ctrl+X: cut selection to kill ring + system clipboard.
+            KeyCommand::CtrlX => {
+                if let Some(text) = self.editor.copy_selection() {
+                    let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(text.clone()));
+                    self.editor.cut_selection();
+                    self.status = format!("Cut {} chars", text.len());
+                }
+                Ok(true)
+            }
+
+            // Shift+Arrow / Shift+Home / Shift+End: extend the
+            // selection. The editor tracks an anchor the first time
+            // one of these fires and extends as more arrive.
+            KeyCommand::ShiftArrowLeft => {
+                self.editor.select_left();
+                Ok(true)
+            }
+            KeyCommand::ShiftArrowRight => {
+                self.editor.select_right();
+                Ok(true)
+            }
+            KeyCommand::ShiftArrowUp => {
+                self.editor.select_up();
+                Ok(true)
+            }
+            KeyCommand::ShiftArrowDown => {
+                self.editor.select_down();
+                Ok(true)
+            }
+            KeyCommand::ShiftHome => {
+                self.editor.select_line_start();
+                Ok(true)
+            }
+            KeyCommand::ShiftEnd => {
+                self.editor.select_line_end();
                 Ok(true)
             }
 
@@ -1117,6 +1188,13 @@ impl InteractiveMode {
             crate::autocomplete::TriggerKind::Bash => {
                 crate::autocomplete::scan_bash_completions(fragment, 12)
             }
+            crate::autocomplete::TriggerKind::Session => {
+                crate::autocomplete::scan_session_completions(
+                    fragment,
+                    &self.sessions_dir,
+                    12,
+                )
+            }
         };
         if items.is_empty() {
             self.autocomplete_active = false;
@@ -1246,7 +1324,7 @@ impl InteractiveMode {
                     .position(|o| thinking_level_from_label(o) == current)
                     .unwrap_or(0);
                 self.display_mode = DisplayMode::ThinkingList;
-                self.status = "Pick thinking level. Enter to apply, Esc to cancel.".to_string();
+                self.status = "Pick thinking level + budget. Enter to apply, Esc to cancel.".to_string();
             }
             "export" => {
                 let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -1319,7 +1397,20 @@ impl InteractiveMode {
                 self.status = "Reloaded auth cache. (Provider TOMLs are loaded at process start.)".to_string();
             }
             "share" => {
-                self.status = "/share is not yet wired; use /export to produce an HTML transcript".to_string();
+                match share_via_gh_gist(&self.messages) {
+                    Ok(url) => {
+                        // Try to drop the URL onto the clipboard too so
+                        // the user can paste it directly.
+                        let _ = arboard::Clipboard::new()
+                            .and_then(|mut c| c.set_text(url.clone()));
+                        self.status = format!("Shared → {url} (copied)");
+                    }
+                    Err(e) => {
+                        self.status = format!(
+                            "Share failed: {e}. Use /export to produce an HTML file instead."
+                        );
+                    }
+                }
             }
             "quit" => {
                 self.status = "Exiting...".to_string();
@@ -1400,6 +1491,14 @@ impl InteractiveMode {
         let messages = self.messages.clone();
         let input_lines = self.editor.visual_lines();
         let (cursor_row, cursor_col) = self.editor.cursor_line_col();
+        // If a selection is active, compute the (row, col) span so the
+        // renderer can highlight the range with a background tint.
+        let selection_span = self.editor.selection_range().map(|(start, end)| {
+            let text = self.editor.text();
+            let (sr, sc) = byte_to_row_col(text, start);
+            let (er, ec) = byte_to_row_col(text, end);
+            ((sr, sc), (er, ec))
+        });
         let status_text = self.status.clone();
         let queued_count = self.queued_messages.len();
         let executing = self.executing;
@@ -1595,39 +1694,64 @@ impl InteractiveMode {
                     } else {
                         Span::styled("  ", Style::default())
                     };
-                    // Slice the line at the cursor column and render the
-                    // cell under the cursor with an inverted style so the
-                    // user sees where edits will land. Only do this on
-                    // the row that actually holds the cursor and only when
-                    // overlays/lists aren't taking focus.
-                    let cursor_here = i == cursor_row && !overlay_active;
-                    if cursor_here {
-                        let mut before = String::new();
-                        let mut under = String::from(" ");
-                        let mut after = String::new();
-                        let mut seen = 0usize;
-                        for (_, ch) in line.char_indices() {
-                            if seen < cursor_col {
-                                before.push(ch);
-                            } else if seen == cursor_col {
-                                under = ch.to_string();
-                            } else {
-                                after.push(ch);
+                    // Per-row selection span (col start..end on this row).
+                    let row_selection: Option<(usize, usize)> =
+                        selection_span.and_then(|((sr, sc), (er, ec))| {
+                            if i < sr || i > er {
+                                return None;
                             }
-                            seen += 1;
+                            let start_col = if i == sr { sc } else { 0 };
+                            let end_col = if i == er { ec } else { line.chars().count() };
+                            if end_col <= start_col {
+                                None
+                            } else {
+                                Some((start_col, end_col))
+                            }
+                        });
+                    let cursor_here = i == cursor_row && !overlay_active;
+                    let mut spans: Vec<Span<'static>> = vec![prompt];
+                    // Walk the characters once so selection, cursor, and
+                    // body all compose into a single line output.
+                    let mut col_idx = 0usize;
+                    let mut buf = String::new();
+                    let mut buf_style = Style::default();
+                    let selection_style =
+                        Style::default().bg(Color::Indexed(60)).fg(Color::White);
+                    let cursor_style =
+                        Style::default().bg(Color::Gray).fg(Color::Black);
+                    let flush = |spans: &mut Vec<Span<'static>>, buf: &mut String, style: Style| {
+                        if !buf.is_empty() {
+                            spans.push(Span::styled(std::mem::take(buf), style));
                         }
-                        Line::from(vec![
-                            prompt,
-                            Span::raw(before),
-                            Span::styled(
-                                under,
-                                Style::default().bg(Color::Gray).fg(Color::Black),
-                            ),
-                            Span::raw(after),
-                        ])
-                    } else {
-                        Line::from(vec![prompt, Span::raw(line.clone())])
+                    };
+                    for ch in line.chars() {
+                        let in_sel = row_selection
+                            .map(|(s, e)| col_idx >= s && col_idx < e)
+                            .unwrap_or(false);
+                        let at_cursor = cursor_here && col_idx == cursor_col;
+                        let desired = if at_cursor {
+                            cursor_style
+                        } else if in_sel {
+                            selection_style
+                        } else {
+                            Style::default()
+                        };
+                        if desired != buf_style {
+                            flush(&mut spans, &mut buf, buf_style);
+                            buf_style = desired;
+                        }
+                        buf.push(ch);
+                        col_idx += 1;
                     }
+                    flush(&mut spans, &mut buf, buf_style);
+                    // Trailing cursor cell (cursor past last char).
+                    if cursor_here && col_idx == cursor_col {
+                        spans.push(Span::styled(" ".to_string(), cursor_style));
+                    }
+                    // Trailing selection cell when the selection extends
+                    // past the end of a soft-wrapped line onto the next
+                    // row; nothing extra needed if we're simply at end.
+                    Line::from(spans)
                 })
                 .collect();
             let editor = Paragraph::new(editor_lines_rendered).wrap(Wrap { trim: false });
@@ -2113,6 +2237,9 @@ fn render_autocomplete_dropdown(
     let title = match kind {
         Some(crate::autocomplete::TriggerKind::File) => format!("Files ({})", items.len()),
         Some(crate::autocomplete::TriggerKind::Bash) => format!("Commands ({})", items.len()),
+        Some(crate::autocomplete::TriggerKind::Session) => {
+            format!("Sessions ({})", items.len())
+        }
         None => format!("Suggestions ({})", items.len()),
     };
     let mut lines = vec![Line::from(Span::styled(
@@ -2480,9 +2607,16 @@ fn render_thinking_list(
             Style::default().fg(Color::Cyan)
         };
         let marker = if *opt == current_str { " (active)" } else { "" };
+        let hint = budget_hint_for_level(opt);
+        let hint_part = if hint.is_empty() {
+            String::new()
+        } else {
+            format!("  {hint}")
+        };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
             Span::styled(opt.to_string(), style),
+            Span::styled(hint_part, dim_style()),
             Span::styled(marker.to_string(), dim_style()),
         ]));
     }
@@ -2498,6 +2632,47 @@ fn thinking_level_from_label(label: &str) -> Option<pi_ai::types::ThinkingLevel>
         "high" => Some(pi_ai::types::ThinkingLevel::High),
         "xhigh" => Some(pi_ai::types::ThinkingLevel::Xhigh),
         _ => None,
+    }
+}
+
+/// Preset token budgets per thinking level. Applied whenever the user
+/// picks a level from the `/thinking` overlay so Anthropic-style
+/// extended-thinking providers get a sensible budget without a separate
+/// prompt. Providers that ignore `thinking_budgets` simply drop it.
+fn budgets_for_level(label: &str) -> Option<pi_ai::types::ThinkingBudgets> {
+    match label {
+        "off" => None,
+        "low" => Some(pi_ai::types::ThinkingBudgets {
+            minimal: Some(512),
+            low: Some(1024),
+            medium: Some(4096),
+            high: Some(16384),
+        }),
+        "medium" => Some(pi_ai::types::ThinkingBudgets {
+            minimal: Some(1024),
+            low: Some(2048),
+            medium: Some(8192),
+            high: Some(24576),
+        }),
+        "high" => Some(pi_ai::types::ThinkingBudgets {
+            minimal: Some(2048),
+            low: Some(4096),
+            medium: Some(16384),
+            high: Some(32768),
+        }),
+        _ => None,
+    }
+}
+
+/// Short budget description surfaced next to each level option in the
+/// `/thinking` overlay.
+fn budget_hint_for_level(label: &str) -> &'static str {
+    match label {
+        "off" => "",
+        "low" => "~1k tokens",
+        "medium" => "~8k tokens",
+        "high" => "~16k tokens",
+        _ => "",
     }
 }
 
@@ -2593,6 +2768,105 @@ header.page {{ color: #8b949e; font-size: .85rem; margin-bottom: 1rem; }}
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::write(path, html)?;
     Ok(())
+}
+
+/// Build a single markdown transcript for sharing and hand it to
+/// `gh gist create` as stdin. Returns the gist URL that `gh` prints
+/// to stdout. Requires the `gh` CLI on PATH and the user logged in;
+/// surfaces a clear error if either is missing.
+fn share_via_gh_gist(messages: &[ConversationMessage]) -> Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let markdown = conversation_to_markdown(messages);
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+
+    let mut child = Command::new("gh")
+        .args([
+            "gist",
+            "create",
+            "--public",
+            "--filename",
+            "pi-session.md",
+            "--desc",
+            &format!("pi session {ts}"),
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("gh not found on PATH: {e}"))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(markdown.as_bytes())
+            .map_err(|e| anyhow::anyhow!("write stdin: {e}"))?;
+    }
+    let out = child.wait_with_output().map_err(|e| anyhow::anyhow!("wait: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(anyhow::anyhow!(if err.is_empty() {
+            "gh gist create exited non-zero".to_string()
+        } else {
+            err
+        }));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines().rev() {
+        let t = line.trim();
+        if t.starts_with("http://") || t.starts_with("https://") {
+            return Ok(t.to_string());
+        }
+    }
+    Err(anyhow::anyhow!(
+        "gh gist returned 0 but no URL found in output"
+    ))
+}
+
+fn conversation_to_markdown(messages: &[ConversationMessage]) -> String {
+    let mut out = String::new();
+    out.push_str("# pi session\n\n");
+    out.push_str(&format!(
+        "_{} \u{2022} {} message(s)_\n\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        messages.len(),
+    ));
+    for m in messages {
+        let header = match m.role.as_str() {
+            "user" => "## You".to_string(),
+            "assistant" => "## Assistant".to_string(),
+            "system" => "## System".to_string(),
+            "error" => "## Error".to_string(),
+            other => format!("## {other}"),
+        };
+        out.push_str(&header);
+        out.push_str("\n\n");
+        if !m.thinking.is_empty() {
+            out.push_str("<details><summary>thinking</summary>\n\n```\n");
+            out.push_str(&m.thinking);
+            out.push_str("\n```\n\n</details>\n\n");
+        }
+        for tc in &m.tool_calls {
+            out.push_str(&format!(
+                "**tool → {}** `{}`\n\n",
+                tc.name, tc.input_preview
+            ));
+            if let Some(o) = &tc.output {
+                out.push_str("```\n");
+                out.push_str(o);
+                if !o.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("```\n\n");
+            }
+        }
+        if !m.content.is_empty() {
+            out.push_str(&m.content);
+            out.push_str("\n\n");
+        }
+    }
+    out
 }
 
 fn copy_last_assistant(messages: &[ConversationMessage]) -> Result<usize> {
@@ -2764,6 +3038,18 @@ fn tool_structured_preview(
         _ => {}
     }
     out
+}
+
+/// Convert a byte offset into a `(row, char-column)` pair using the
+/// same row/col semantics as `InputEditor::cursor_line_col`. Used by
+/// the selection renderer to paint the highlighted range row by row.
+fn byte_to_row_col(text: &str, byte: usize) -> (usize, usize) {
+    let clamp = byte.min(text.len());
+    let prefix = &text[..clamp];
+    let row = prefix.bytes().filter(|b| *b == b'\n').count();
+    let line_start = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = text[line_start..clamp].chars().count();
+    (row, col)
 }
 
 fn preview_tool_args(input: &serde_json::Value) -> String {

@@ -101,6 +101,10 @@ pub struct Agent {
     /// `None` means "provider default"; the TUI cycles between
     /// `None`, `Low`, `Medium`, `High`.
     thinking_level: Option<pi_ai::types::ThinkingLevel>,
+    /// Per-level token budgets forwarded to providers that honor
+    /// `thinking_budgets` (Anthropic extended thinking today). `None`
+    /// lets the provider pick its default.
+    thinking_budgets: Option<pi_ai::types::ThinkingBudgets>,
 }
 
 impl Agent {
@@ -114,6 +118,7 @@ impl Agent {
             api_key: None,
             config: AgentConfig::default(),
             thinking_level: None,
+            thinking_budgets: None,
         }
     }
 
@@ -167,6 +172,14 @@ impl Agent {
 
     pub fn set_thinking_level(&mut self, level: Option<pi_ai::types::ThinkingLevel>) {
         self.thinking_level = level;
+    }
+
+    pub fn thinking_budgets(&self) -> Option<&pi_ai::types::ThinkingBudgets> {
+        self.thinking_budgets.as_ref()
+    }
+
+    pub fn set_thinking_budgets(&mut self, budgets: Option<pi_ai::types::ThinkingBudgets>) {
+        self.thinking_budgets = budgets;
     }
 
     /// Convert tool registry into provider-agnostic ToolSchema list.
@@ -309,7 +322,7 @@ impl Agent {
                 session_id: None,
                 headers: None,
                 reasoning_effort: self.thinking_level,
-                thinking_budgets: None,
+                thinking_budgets: self.thinking_budgets.clone(),
             };
 
             let model = resolve_model(&self.model_id)?;

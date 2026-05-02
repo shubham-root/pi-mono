@@ -38,6 +38,9 @@ pub struct InputEditor {
     text: String,
     /// Byte offset into `text`. Always on a UTF-8 char boundary.
     cursor: usize,
+    /// If set, a selection spans `selection..cursor` (in either
+    /// direction). Any non-selection-extending edit clears it.
+    selection: Option<usize>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// Op group of the last applied edit, used to decide whether the
@@ -52,6 +55,7 @@ impl InputEditor {
         Self {
             text: String::new(),
             cursor: 0,
+            selection: None,
             undo: Vec::new(),
             redo: Vec::new(),
             last_group: None,
@@ -103,12 +107,14 @@ impl InputEditor {
         self.push_undo(OpGroup::Boundary);
         self.text.clear();
         self.cursor = 0;
+        self.selection = None;
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.push_undo(OpGroup::Boundary);
         self.text = text.into();
         self.cursor = self.text.len();
+        self.selection = None;
     }
 
     // ---------------------------------------------------------------
@@ -116,7 +122,14 @@ impl InputEditor {
     // ---------------------------------------------------------------
 
     pub fn insert_char(&mut self, c: char) {
-        if c == '\n' {
+        // If there's an active selection, typing replaces it (Emacs /
+        // VSCode / TypeScript-pi behavior). We snapshot once, delete
+        // the range, and then insert the char as a boundary group so
+        // the replace is one undo step.
+        if self.selection.is_some() {
+            self.delete_selection();
+            self.push_undo(OpGroup::Boundary);
+        } else if c == '\n' {
             self.push_undo(OpGroup::Boundary);
         } else {
             self.push_undo(OpGroup::Insert);
@@ -134,6 +147,9 @@ impl InputEditor {
         if s.is_empty() {
             return;
         }
+        if self.selection.is_some() {
+            self.delete_selection();
+        }
         self.push_undo(OpGroup::Boundary);
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
@@ -149,6 +165,10 @@ impl InputEditor {
     // ---------------------------------------------------------------
 
     pub fn backspace(&mut self) {
+        if self.selection.is_some() {
+            self.delete_selection();
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
@@ -160,6 +180,10 @@ impl InputEditor {
     }
 
     pub fn delete_forward(&mut self) {
+        if self.selection.is_some() {
+            self.delete_selection();
+            return;
+        }
         if self.cursor >= self.text.len() {
             return;
         }
@@ -246,43 +270,52 @@ impl InputEditor {
 
     pub fn move_left(&mut self) {
         self.finalize_group();
+        self.selection = None;
         if self.cursor > 0 {
             self.cursor = prev_char_boundary(&self.text, self.cursor);
         }
     }
     pub fn move_right(&mut self) {
         self.finalize_group();
+        self.selection = None;
         if self.cursor < self.text.len() {
             self.cursor = next_char_boundary(&self.text, self.cursor);
         }
     }
     pub fn move_word_left(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = word_start_before(&self.text, self.cursor);
     }
     pub fn move_word_right(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = word_end_after(&self.text, self.cursor);
     }
     pub fn move_line_start(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = line_start(&self.text, self.cursor);
     }
     pub fn move_line_end(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = line_end(&self.text, self.cursor);
     }
     pub fn move_buffer_start(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = 0;
     }
     pub fn move_buffer_end(&mut self) {
         self.finalize_group();
+        self.selection = None;
         self.cursor = self.text.len();
     }
 
     pub fn move_up(&mut self) {
         self.finalize_group();
+        self.selection = None;
         let (row, col) = self.cursor_line_col();
         if row == 0 {
             return;
@@ -291,12 +324,122 @@ impl InputEditor {
     }
     pub fn move_down(&mut self) {
         self.finalize_group();
+        self.selection = None;
         let (row, col) = self.cursor_line_col();
         let total_rows = self.text.bytes().filter(|b| *b == b'\n').count();
         if row >= total_rows {
             return;
         }
         self.cursor = position_for(&self.text, row + 1, col);
+    }
+
+    // ---------------------------------------------------------------
+    // selection-extending movement (Shift+Arrow family)
+    // ---------------------------------------------------------------
+
+    fn ensure_selection_anchor(&mut self) {
+        if self.selection.is_none() {
+            self.selection = Some(self.cursor);
+        }
+    }
+
+    pub fn select_left(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        if self.cursor > 0 {
+            self.cursor = prev_char_boundary(&self.text, self.cursor);
+        }
+    }
+    pub fn select_right(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        if self.cursor < self.text.len() {
+            self.cursor = next_char_boundary(&self.text, self.cursor);
+        }
+    }
+    pub fn select_up(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        let (row, col) = self.cursor_line_col();
+        if row == 0 {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = position_for(&self.text, row - 1, col);
+    }
+    pub fn select_down(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        let (row, col) = self.cursor_line_col();
+        let total_rows = self.text.bytes().filter(|b| *b == b'\n').count();
+        if row >= total_rows {
+            self.cursor = self.text.len();
+            return;
+        }
+        self.cursor = position_for(&self.text, row + 1, col);
+    }
+    pub fn select_line_start(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        self.cursor = line_start(&self.text, self.cursor);
+    }
+    pub fn select_line_end(&mut self) {
+        self.finalize_group();
+        self.ensure_selection_anchor();
+        self.cursor = line_end(&self.text, self.cursor);
+    }
+
+    /// Selection helpers: return the normalized `(start, end)` byte
+    /// range if there is a selection, else `None`.
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection?;
+        if anchor == self.cursor {
+            return None;
+        }
+        Some((anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+    pub fn selection_text(&self) -> Option<&str> {
+        let (a, b) = self.selection_range()?;
+        Some(&self.text[a..b])
+    }
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+    pub fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    /// Delete the selected range. Internal helper used by
+    /// insertion / backspace / delete_forward when a selection is
+    /// active. Caller snapshots for undo separately.
+    fn delete_selection(&mut self) {
+        let Some((start, end)) = self.selection_range() else {
+            self.selection = None;
+            return;
+        };
+        self.push_undo(OpGroup::Boundary);
+        self.text.replace_range(start..end, "");
+        self.cursor = start;
+        self.selection = None;
+        self.redo.clear();
+    }
+
+    /// Cut the selection into the kill ring. Returns `true` if
+    /// anything was cut.
+    pub fn cut_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+        let removed = self.text[start..end].to_string();
+        self.kill_ring.push(removed);
+        self.delete_selection();
+        true
+    }
+
+    /// Copy the selection into the kill ring. Returns the copied text
+    /// if anything was selected.
+    pub fn copy_selection(&self) -> Option<String> {
+        self.selection_text().map(|s| s.to_string())
     }
 
     pub fn is_on_last_line(&self) -> bool {
@@ -614,5 +757,70 @@ mod tests {
         let text = "a\nbbb";
         let pos = position_for(text, 0, 3);
         assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn shift_arrow_builds_selection() {
+        let mut e = InputEditor::new();
+        e.insert_str("hello world");
+        // cursor at end (11). Select left twice -> selects "ld".
+        e.select_left();
+        e.select_left();
+        assert_eq!(e.selection_text(), Some("ld"));
+        // extend further -> "rld"
+        e.select_left();
+        assert_eq!(e.selection_text(), Some("rld"));
+    }
+
+    #[test]
+    fn typing_replaces_selection() {
+        let mut e = InputEditor::new();
+        e.insert_str("hello world");
+        // Select "world" (5 chars back from byte 11).
+        for _ in 0..5 {
+            e.select_left();
+        }
+        e.insert_char('X');
+        assert_eq!(e.text(), "hello X");
+        assert_eq!(e.cursor_byte(), 7);
+        assert!(!e.has_selection());
+    }
+
+    #[test]
+    fn backspace_deletes_selection() {
+        let mut e = InputEditor::new();
+        e.insert_str("hello world");
+        for _ in 0..5 {
+            e.select_left();
+        }
+        e.backspace();
+        assert_eq!(e.text(), "hello ");
+        assert!(!e.has_selection());
+    }
+
+    #[test]
+    fn cut_copies_and_deletes() {
+        let mut e = InputEditor::new();
+        e.insert_str("hello world");
+        for _ in 0..5 {
+            e.select_left();
+        }
+        assert_eq!(e.copy_selection().as_deref(), Some("world"));
+        assert!(e.cut_selection());
+        assert_eq!(e.text(), "hello ");
+        // Yank pastes the cut text back.
+        e.yank();
+        assert_eq!(e.text(), "hello world");
+    }
+
+    #[test]
+    fn plain_move_collapses_selection_without_deleting() {
+        let mut e = InputEditor::new();
+        e.insert_str("abc");
+        e.select_left();
+        assert!(e.has_selection());
+        e.move_left();
+        assert!(!e.has_selection());
+        assert_eq!(e.text(), "abc");
     }
 }
