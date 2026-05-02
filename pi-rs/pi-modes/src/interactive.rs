@@ -243,6 +243,29 @@ pub struct UsageStats {
     pub total_tokens: u64,
 }
 
+/// Stats from the most recent completed turn. Shown in the row above
+/// the input box so the user can see throughput at a glance without
+/// having to parse the running session total.
+#[derive(Clone, Debug)]
+pub struct LastCallStats {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub total: u64,
+    pub duration_secs: f64,
+}
+
+impl LastCallStats {
+    fn tps(&self) -> f64 {
+        if self.duration_secs > 0.0 {
+            self.output as f64 / self.duration_secs
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Re-export the streaming event type so callers can keep the namespace
 /// local to this module if they prefer.
 pub use pi_core::AgentEvent;
@@ -309,6 +332,10 @@ pub struct InteractiveMode {
     /// `AgentEvent::Usage` so the footer's `0.0%/?` can show the real
     /// percentage of context used.
     usage: UsageStats,
+    /// Stats from the most recent completed turn (output / input /
+    /// cache rw / total / duration). Rendered in the row above the
+    /// input box.
+    last_call: Option<LastCallStats>,
 }
 
 struct PromptJob {
@@ -323,6 +350,10 @@ struct PromptJob {
     /// Index into `messages` of the streaming assistant placeholder for
     /// this job. We append tokens here as they arrive.
     assistant_index: usize,
+    /// Usage snapshot taken at turn-start so the `LastCallStats` on
+    /// completion reflects the delta for this turn (not the whole
+    /// session).
+    pre_turn_usage: UsageStats,
 }
 
 impl InteractiveMode {
@@ -366,6 +397,7 @@ impl InteractiveMode {
             ctrl_c_count: 0,
             active_job: None,
             usage: UsageStats::default(),
+            last_call: None,
         })
     }
 
@@ -482,10 +514,33 @@ impl InteractiveMode {
                 }
                 match result {
                     Ok(()) => {
-                        self.status = format!(
-                            "Ready ({:.1}s)",
-                            job.started_at.elapsed().as_secs_f32()
-                        );
+                        let elapsed = job.started_at.elapsed().as_secs_f64();
+                        // Snapshot the delta against the pre-turn usage
+                        // so the last-call row reflects just this turn.
+                        self.last_call = Some(LastCallStats {
+                            input: self
+                                .usage
+                                .input_tokens
+                                .saturating_sub(job.pre_turn_usage.input_tokens),
+                            output: self
+                                .usage
+                                .output_tokens
+                                .saturating_sub(job.pre_turn_usage.output_tokens),
+                            cache_read: self
+                                .usage
+                                .cache_read_tokens
+                                .saturating_sub(job.pre_turn_usage.cache_read_tokens),
+                            cache_write: self
+                                .usage
+                                .cache_write_tokens
+                                .saturating_sub(job.pre_turn_usage.cache_write_tokens),
+                            total: self
+                                .usage
+                                .total_tokens
+                                .saturating_sub(job.pre_turn_usage.total_tokens),
+                            duration_secs: elapsed,
+                        });
+                        self.status = format!("Ready ({:.1}s)", elapsed);
                     }
                     Err(e) => {
                         self.status = format!("Error: {}", e);
@@ -652,6 +707,7 @@ impl InteractiveMode {
             started_at,
             user_message: text,
             assistant_index,
+            pre_turn_usage: self.usage.clone(),
         });
         self.executing = true;
         self.status = "Executing...".to_string();
@@ -817,6 +873,15 @@ impl InteractiveMode {
                     }
                     self.editor.clear();
                 }
+                Ok(true)
+            }
+
+            // Shift+Enter (and Ctrl+J as a universal fallback): insert
+            // a literal newline into the editor buffer instead of
+            // submitting. Gives users a way to compose multi-line
+            // prompts even on terminals that don't forward Shift+Enter.
+            KeyCommand::ShiftEnter | KeyCommand::CtrlJ => {
+                self.editor.newline();
                 Ok(true)
             }
 
@@ -1264,6 +1329,7 @@ impl InteractiveMode {
                 self.messages.clear();
                 self.queued_messages.clear();
                 self.usage = UsageStats::default();
+                self.last_call = None;
                 // Also clear the agent's own message history so the
                 // next turn doesn't continue the prior conversation.
                 if let Some(agent) = self.agent.as_mut() {
@@ -1526,6 +1592,7 @@ impl InteractiveMode {
         let autocomplete_items = self.autocomplete_items.clone();
         let autocomplete_selected = self.autocomplete_selected;
         let autocomplete_kind = self.autocomplete_kind;
+        let last_call = self.last_call.clone();
 
         // Footer inputs: pwd + branch on one line, token stats + model on
         // the next. These are resolved via the registry so they stay truthy
@@ -1564,18 +1631,41 @@ impl InteractiveMode {
                 return;
             }
 
-            // -------- Bottom 2 rows: footer --------
-            let footer_stats_row = size.height - 1;
-            let footer_pwd_row = size.height - 2;
-            let hint_row = size.height - 3;
+            // -------- Bottom 3 rows: footer --------
+            let footer_stats_row = size.height - 1;  // tokens + model
+            let footer_pwd_row = size.height - 2;    // pwd (branch)
+            let hint_row = size.height - 3;          // key hints + status
 
-            // -------- Editor: 1-N rows above the hint row --------
-            let editor_lines_src: Vec<String> = input_lines.clone();
-            let editor_height = (editor_lines_src.len() as u16).clamp(1, 6);
-            let editor_top = hint_row.saturating_sub(editor_height);
+            // -------- Input textbox (bracketed by horizontal rules) --------
+            // Max 7 editor rows; beyond that the viewport scrolls so the
+            // cursor stays in view. The lower rule is fixed; the upper
+            // rule floats up as the user types.
+            let total_editor_rows = input_lines.len() as u16;
+            let editor_height: u16 = total_editor_rows.clamp(1, 7);
+            let lower_rule_row = hint_row.saturating_sub(1);
+            let editor_top = lower_rule_row.saturating_sub(editor_height);
+            let upper_rule_row = editor_top.saturating_sub(1);
+            let last_call_row = upper_rule_row.saturating_sub(1);
 
-            // -------- Overlay area above editor (command palette / model
-            //          list / settings list). Takes up to ~60% of screen. --------
+            // Compute which slice of input_lines is visible given the
+            // 7-row viewport. Bottom-anchor (so typing stays in view) and
+            // nudge up when the cursor has moved above the viewport.
+            let (first_visible_row, editor_lines_src): (usize, Vec<String>) =
+                if (total_editor_rows as usize) <= editor_height as usize {
+                    (0, input_lines.clone())
+                } else {
+                    let max_first =
+                        (total_editor_rows as usize).saturating_sub(editor_height as usize);
+                    let mut first = max_first;
+                    if cursor_row < first {
+                        first = cursor_row;
+                    }
+                    let slice = input_lines[first..first + editor_height as usize].to_vec();
+                    (first, slice)
+                };
+            let local_cursor_row = cursor_row.saturating_sub(first_visible_row);
+
+            // -------- Overlay area (command palette / model list / ...) --------
             let overlay_max_h = (size.height as f32 * 0.55) as u16;
             let overlay_active = palette_active
                 || autocomplete_active
@@ -1600,9 +1690,9 @@ impl InteractiveMode {
             } else {
                 0
             };
-            let overlay_top = editor_top.saturating_sub(overlay_height);
+            let overlay_top = last_call_row.saturating_sub(overlay_height);
 
-            // -------- Messages area: top down to overlay --------
+            // -------- Messages area: top down to overlay / call-info row --------
             let msg_area = Rect {
                 x: 0,
                 y: 0,
@@ -1684,8 +1774,12 @@ impl InteractiveMode {
             let editor_lines_rendered: Vec<Line> = editor_lines_src
                 .iter()
                 .enumerate()
-                .map(|(i, line)| {
-                    let prompt = if i == 0 {
+                .map(|(vi, line)| {
+                    // `vi` is the viewport row; `gi` is the global line
+                    // index into `input_lines`. Cursor / selection / first-row
+                    // decorations all reason in global coordinates.
+                    let gi = vi + first_visible_row;
+                    let prompt = if gi == 0 {
                         if executing {
                             Span::styled("▌ ", Style::default().fg(Color::Yellow))
                         } else {
@@ -1697,18 +1791,18 @@ impl InteractiveMode {
                     // Per-row selection span (col start..end on this row).
                     let row_selection: Option<(usize, usize)> =
                         selection_span.and_then(|((sr, sc), (er, ec))| {
-                            if i < sr || i > er {
+                            if gi < sr || gi > er {
                                 return None;
                             }
-                            let start_col = if i == sr { sc } else { 0 };
-                            let end_col = if i == er { ec } else { line.chars().count() };
+                            let start_col = if gi == sr { sc } else { 0 };
+                            let end_col = if gi == er { ec } else { line.chars().count() };
                             if end_col <= start_col {
                                 None
                             } else {
                                 Some((start_col, end_col))
                             }
                         });
-                    let cursor_here = i == cursor_row && !overlay_active;
+                    let cursor_here = vi == local_cursor_row && !overlay_active;
                     let mut spans: Vec<Span<'static>> = vec![prompt];
                     // Walk the characters once so selection, cursor, and
                     // body all compose into a single line output.
@@ -1757,7 +1851,48 @@ impl InteractiveMode {
             let editor = Paragraph::new(editor_lines_rendered).wrap(Wrap { trim: false });
             frame.render_widget(editor, editor_area);
 
-            // ===== Hint row (just above editor) =====
+            // ===== Last-call stats row (dim grey, above upper boundary) =====
+            // Rendered only when we have a completed turn to summarize;
+            // otherwise the row stays blank so the boundary-line + editor
+            // block sits closer to the transcript.
+            if !overlay_active {
+                let last_call_area = Rect {
+                    x: 0,
+                    y: last_call_row,
+                    width: size.width,
+                    height: 1,
+                };
+                let last_call_line = last_call.as_ref().map(render_last_call_line).unwrap_or_else(|| Line::from(""));
+                frame.render_widget(Paragraph::new(last_call_line), last_call_area);
+            }
+
+            // ===== Upper + lower boundary rules =====
+            if !overlay_active {
+                let rule = "─".repeat(size.width as usize);
+                let upper_area = Rect {
+                    x: 0,
+                    y: upper_rule_row,
+                    width: size.width,
+                    height: 1,
+                };
+                let lower_area = Rect {
+                    x: 0,
+                    y: lower_rule_row,
+                    width: size.width,
+                    height: 1,
+                };
+                let rule_style = Style::default().fg(Color::DarkGray);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(rule.clone(), rule_style))),
+                    upper_area,
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(rule, rule_style))),
+                    lower_area,
+                );
+            }
+
+            // ===== Hint row (just below lower boundary) =====
             let hint_area = Rect { x: 0, y: hint_row, width: size.width, height: 1 };
             let hint = if executing {
                 render_executing_hint(&status_text, queued_count)
@@ -2130,6 +2265,10 @@ fn render_hint_line_chat(status: &str, queued: usize) -> Line<'static> {
         Span::raw(" send "),
         Span::styled("\u{00b7}".to_string(), muted_style()),
         Span::raw(" "),
+        Span::styled("ctrl+j".to_string(), Style::default().fg(Color::Yellow)),
+        Span::raw(" newline "),
+        Span::styled("\u{00b7}".to_string(), muted_style()),
+        Span::raw(" "),
         Span::styled("alt+enter".to_string(), Style::default().fg(Color::Yellow)),
         Span::raw(" queue "),
         Span::styled("\u{00b7}".to_string(), muted_style()),
@@ -2139,11 +2278,7 @@ fn render_hint_line_chat(status: &str, queued: usize) -> Line<'static> {
         Span::styled("\u{00b7}".to_string(), muted_style()),
         Span::raw(" "),
         Span::styled("ctrl+l".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" model "),
-        Span::styled("\u{00b7}".to_string(), muted_style()),
-        Span::raw(" "),
-        Span::styled("ctrl+c".to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" clear"),
+        Span::raw(" model"),
     ];
     if queued > 0 {
         spans.push(Span::styled("   ".to_string(), muted_style()));
@@ -3040,6 +3175,74 @@ fn tool_structured_preview(
     out
 }
 
+/// Format a non-negative integer with Indian-style digit grouping:
+/// last 3 digits grouped, then pairs. E.g. `1234` -> `1,234`;
+/// `12162440` -> `1,21,62,440`.
+fn format_int_indian(n: u64) -> String {
+    let s = n.to_string();
+    if s.len() <= 3 {
+        return s;
+    }
+    let (head, tail) = s.split_at(s.len() - 3);
+    let mut groups: Vec<&str> = Vec::new();
+    let mut i = head.len();
+    while i > 0 {
+        if i >= 2 {
+            groups.push(&head[i - 2..i]);
+            i -= 2;
+        } else {
+            groups.push(&head[..i]);
+            i = 0;
+        }
+    }
+    groups.reverse();
+    format!("{},{}", groups.join(","), tail)
+}
+
+/// Render the last-call stats row shown above the input textbox.
+/// All parts are dim grey so the row stays low-contrast; separators
+/// are middle-dots.
+fn render_last_call_line(stats: &LastCallStats) -> Line<'static> {
+    let sep = Span::styled(" \u{00b7} ".to_string(), Style::default().fg(Color::DarkGray));
+    let st = Style::default().fg(Color::DarkGray);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(
+        format!("TPS {:.1} tok/s", stats.tps()),
+        st,
+    ));
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        format!("out {}", format_int_indian(stats.output)),
+        st,
+    ));
+    spans.push(sep.clone());
+    spans.push(Span::styled(
+        format!("in {}", format_int_indian(stats.input)),
+        st,
+    ));
+    if stats.cache_read > 0 || stats.cache_write > 0 {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!(
+                "cache r/w {}/{}",
+                format_int_indian(stats.cache_read),
+                format_int_indian(stats.cache_write),
+            ),
+            st,
+        ));
+    }
+    if stats.total > 0 {
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!("total {}", format_int_indian(stats.total)),
+            st,
+        ));
+    }
+    spans.push(sep);
+    spans.push(Span::styled(format!("{:.1}s", stats.duration_secs), st));
+    Line::from(spans)
+}
+
 /// Convert a byte offset into a `(row, char-column)` pair using the
 /// same row/col semantics as `InputEditor::cursor_line_col`. Used by
 /// the selection renderer to paint the highlighted range row by row.
@@ -3244,5 +3447,16 @@ mod tests {
         let filtered = filter_model_rows("claude", &rows);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model_id, "claude-opus-4");
+    }
+
+    #[test]
+    fn indian_digit_grouping_matches_user_preference() {
+        assert_eq!(format_int_indian(0), "0");
+        assert_eq!(format_int_indian(999), "999");
+        assert_eq!(format_int_indian(1_000), "1,000");
+        assert_eq!(format_int_indian(12_345), "12,345");
+        assert_eq!(format_int_indian(1_00_000), "1,00,000");
+        assert_eq!(format_int_indian(12_162_440), "1,21,62,440");
+        assert_eq!(format_int_indian(1_25_11_376), "1,25,11,376");
     }
 }
