@@ -10,6 +10,8 @@
 
 use crate::editor::InputEditor;
 use anyhow::Result;
+use std::fs;
+use std::path::{Path, PathBuf};
 use pi_core::model_registry::ModelRegistry;
 use pi_core::Agent;
 use pi_tui::{input::KeyCommand, EventLoop};
@@ -41,6 +43,7 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
         SlashCommand { name: "export".to_string(), description: "Export to HTML file".to_string() },
         SlashCommand { name: "share".to_string(), description: "Share as GitHub gist".to_string() },
         SlashCommand { name: "compact".to_string(), description: "Manual context compaction".to_string() },
+        SlashCommand { name: "thinking".to_string(), description: "Set reasoning level".to_string() },
         SlashCommand { name: "copy".to_string(), description: "Copy last assistant message".to_string() },
         SlashCommand { name: "reload".to_string(), description: "Reload config and extensions".to_string() },
         SlashCommand { name: "quit".to_string(), description: "Exit pi".to_string() },
@@ -126,6 +129,14 @@ enum DisplayMode {
     Chat,
     ModelList,
     SettingsList,
+    /// Pick a provider to log into (enter an API key for).
+    LoginList,
+    /// After picking a provider, type the key inline.
+    LoginKeyEntry,
+    /// Transcript tree viewer.
+    TreeView,
+    /// Thinking-level cycling overlay.
+    ThinkingList,
 }
 
 /// Conversation entry rendered in the chat area. We remember enough
@@ -192,6 +203,23 @@ pub struct InteractiveMode {
     settings_list: Vec<SettingInfo>,
     settings_selected: usize,
 
+    // Login flow state
+    login_list: Vec<LoginRow>,
+    login_selected: usize,
+    login_provider_id: Option<String>,
+    login_key_input: String,
+
+    // Tree viewer
+    tree_rows: Vec<TreeRow>,
+    tree_selected: usize,
+
+    // Thinking-level selector
+    thinking_options: Vec<&'static str>,
+    thinking_selected: usize,
+
+    // Cached sessions directory for save/fork
+    sessions_dir: PathBuf,
+
     // Escape/Ctrl+C tracking
     last_escape_time: Option<std::time::Instant>,
     ctrl_c_count: u32,
@@ -244,6 +272,15 @@ impl InteractiveMode {
             model_selected: 0,
             settings_list: Vec::new(),
             settings_selected: 0,
+            login_list: Vec::new(),
+            login_selected: 0,
+            login_provider_id: None,
+            login_key_input: String::new(),
+            tree_rows: Vec::new(),
+            tree_selected: 0,
+            thinking_options: vec!["off", "low", "medium", "high"],
+            thinking_selected: 0,
+            sessions_dir: default_sessions_dir(),
             last_escape_time: None,
             ctrl_c_count: 0,
             active_job: None,
@@ -585,6 +622,58 @@ impl InteractiveMode {
                         self.status = format!("Setting: {} = {}", s.name, s.current);
                         self.display_mode = DisplayMode::Chat;
                     }
+                } else if self.display_mode == DisplayMode::LoginList {
+                    if !self.login_list.is_empty() {
+                        let row = self.login_list[self.login_selected].clone();
+                        if self.login_provider_id.as_deref() == Some("<logout>") {
+                            // Logout flow — clear this provider's key.
+                            match crate::auth::clear_key(&row.provider_id) {
+                                Ok(true) => {
+                                    self.status = format!(
+                                        "Cleared auth.json entry for {}",
+                                        row.display_name
+                                    );
+                                }
+                                Ok(false) => {
+                                    self.status = format!(
+                                        "No auth.json entry for {} to clear",
+                                        row.display_name
+                                    );
+                                }
+                                Err(e) => {
+                                    self.status = format!("Logout failed: {e}");
+                                }
+                            }
+                            self.login_provider_id = None;
+                            self.display_mode = DisplayMode::Chat;
+                        } else {
+                            // Login flow — transition to key-entry.
+                            self.login_provider_id = Some(row.provider_id.clone());
+                            self.login_key_input.clear();
+                            self.display_mode = DisplayMode::LoginKeyEntry;
+                            self.status = format!(
+                                "Paste your {} API key. Enter to save, Esc to cancel.",
+                                row.display_name
+                            );
+                        }
+                    }
+                } else if self.display_mode == DisplayMode::LoginKeyEntry {
+                    self.finalize_login();
+                    self.login_provider_id = None;
+                    self.login_key_input.clear();
+                    self.display_mode = DisplayMode::Chat;
+                } else if self.display_mode == DisplayMode::ThinkingList {
+                    if let Some(&opt) = self.thinking_options.get(self.thinking_selected) {
+                        let level = thinking_level_from_label(opt);
+                        if let Some(agent) = self.agent.as_mut() {
+                            agent.set_thinking_level(level);
+                        }
+                        self.status = format!("Thinking level → {opt}");
+                    }
+                    self.display_mode = DisplayMode::Chat;
+                } else if self.display_mode == DisplayMode::TreeView {
+                    // Enter on a tree node is a no-op for now; Esc returns.
+                    self.status = "Tree node selected (navigation only for now)".to_string();
                 } else if !self.editor.is_empty() {
                     // Send message
                     let msg = self.editor.text().trim().to_string();
@@ -633,6 +722,8 @@ impl InteractiveMode {
                 } else if self.display_mode != DisplayMode::Chat {
                     self.display_mode = DisplayMode::Chat;
                     self.model_filter.clear();
+                    self.login_provider_id = None;
+                    self.login_key_input.clear();
                     self.status = "Back to chat".to_string();
                 } else if !self.editor.is_empty() {
                     self.editor.clear();
@@ -651,6 +742,14 @@ impl InteractiveMode {
                     let rows = build_model_rows(ModelRegistry::global());
                     self.model_list = filter_model_rows(&self.model_filter, &rows);
                     self.model_selected = 0;
+                    return Ok(true);
+                }
+
+                // Login key entry — accumulate chars privately, don't
+                // touch the editor buffer so the key never lands in
+                // transcript text.
+                if self.display_mode == DisplayMode::LoginKeyEntry {
+                    self.login_key_input.push(c);
                     return Ok(true);
                 }
 
@@ -683,6 +782,10 @@ impl InteractiveMode {
                     self.model_selected = 0;
                     return Ok(true);
                 }
+                if self.display_mode == DisplayMode::LoginKeyEntry {
+                    self.login_key_input.pop();
+                    return Ok(true);
+                }
 
                 self.editor.backspace();
                 if self.palette_active {
@@ -713,6 +816,12 @@ impl InteractiveMode {
                     self.model_selected = self.model_selected.saturating_sub(1);
                 } else if self.display_mode == DisplayMode::SettingsList {
                     self.settings_selected = self.settings_selected.saturating_sub(1);
+                } else if self.display_mode == DisplayMode::LoginList {
+                    self.login_selected = self.login_selected.saturating_sub(1);
+                } else if self.display_mode == DisplayMode::TreeView {
+                    self.tree_selected = self.tree_selected.saturating_sub(1);
+                } else if self.display_mode == DisplayMode::ThinkingList {
+                    self.thinking_selected = self.thinking_selected.saturating_sub(1);
                 }
                 Ok(true)
             }
@@ -730,6 +839,18 @@ impl InteractiveMode {
                 } else if self.display_mode == DisplayMode::SettingsList && !self.settings_list.is_empty() {
                     if self.settings_selected < self.settings_list.len() - 1 {
                         self.settings_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::LoginList && !self.login_list.is_empty() {
+                    if self.login_selected < self.login_list.len() - 1 {
+                        self.login_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::TreeView && !self.tree_rows.is_empty() {
+                    if self.tree_selected < self.tree_rows.len() - 1 {
+                        self.tree_selected += 1;
+                    }
+                } else if self.display_mode == DisplayMode::ThinkingList {
+                    if self.thinking_selected < self.thinking_options.len() - 1 {
+                        self.thinking_selected += 1;
                     }
                 }
                 Ok(true)
@@ -859,18 +980,144 @@ impl InteractiveMode {
             "new" => {
                 self.messages.clear();
                 self.queued_messages.clear();
+                self.usage = UsageStats::default();
+                // Also clear the agent's own message history so the
+                // next turn doesn't continue the prior conversation.
+                if let Some(agent) = self.agent.as_mut() {
+                    // There is no explicit reset; easiest safe path is to
+                    // rebuild by dropping the old one into a fresh model.
+                    // `/new` should be cheap, but if something is in
+                    // flight we let it finish first.
+                    if self.active_job.is_none() {
+                        let id = agent.model_id().to_string();
+                        let new_agent = Agent::new(&id);
+                        *agent = new_agent;
+                    }
+                }
                 self.status = "New session started".to_string();
             }
             "tree" => {
-                self.status = format!("Session tree: {} messages", self.messages.len());
+                self.tree_rows = build_tree_rows(&self.messages);
+                self.tree_selected = 0;
+                self.display_mode = DisplayMode::TreeView;
+                self.status = format!(
+                    "Session tree — {} node(s). ↑↓ nav, Esc back.",
+                    self.tree_rows.len()
+                );
             }
             "session" => {
-                self.status = format!("Session: {} messages, {} queued", self.messages.len(), self.queued_messages.len());
+                self.status = format!(
+                    "Session: {} messages, {} queued",
+                    self.messages.len(),
+                    self.queued_messages.len()
+                );
+            }
+            "login" => {
+                let registry = ModelRegistry::global();
+                let saved = crate::auth::load_auth().unwrap_or_default();
+                self.login_list = build_login_rows(registry, &saved);
+                self.login_selected = 0;
+                self.display_mode = DisplayMode::LoginList;
+                self.status = "Pick a provider to sign in to. ↑↓ nav, Enter to select, Esc to cancel.".to_string();
+            }
+            "logout" => {
+                // For logout we reuse the login list UI but on Enter we'll
+                // clear the key instead of prompting for one. The selection
+                // model sets `login_provider_id` as a side-channel marker.
+                let registry = ModelRegistry::global();
+                let saved = crate::auth::load_auth().unwrap_or_default();
+                self.login_list = build_login_rows(registry, &saved);
+                self.login_selected = 0;
+                self.login_provider_id = Some("<logout>".to_string());
+                self.display_mode = DisplayMode::LoginList;
+                self.status = "Pick a provider to clear from auth.json. Enter to clear, Esc to cancel.".to_string();
+            }
+            "thinking" => {
+                let current = self.agent.as_ref().and_then(|a| a.thinking_level());
+                // Preselect the current level.
+                self.thinking_selected = self
+                    .thinking_options
+                    .iter()
+                    .position(|o| thinking_level_from_label(o) == current)
+                    .unwrap_or(0);
+                self.display_mode = DisplayMode::ThinkingList;
+                self.status = "Pick thinking level. Enter to apply, Esc to cancel.".to_string();
+            }
+            "export" => {
+                let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+                let path = std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(format!("pi-session-{ts}.html"));
+                match export_conversation_html(&self.messages, &path) {
+                    Ok(()) => {
+                        self.status = format!("Exported → {}", path.display());
+                    }
+                    Err(e) => {
+                        self.status = format!("Export failed: {e}");
+                    }
+                }
+            }
+            "copy" => match copy_last_assistant(&self.messages) {
+                Ok(bytes) => {
+                    self.status = format!("Copied {} chars to clipboard", bytes);
+                }
+                Err(e) => {
+                    self.status = format!("Copy failed: {e}");
+                }
+            },
+            "fork" => {
+                let ts = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
+                let path = self.sessions_dir.join(format!("fork-{ts}.json"));
+                let model = self
+                    .agent
+                    .as_ref()
+                    .map(|a| a.model_id().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                match save_transcript_json(&self.messages, &path, &model) {
+                    Ok(()) => {
+                        self.status = format!("Forked → {}", path.display());
+                    }
+                    Err(e) => {
+                        self.status = format!("Fork failed: {e}");
+                    }
+                }
+            }
+            "compact" => {
+                // Render a best-effort inline summary into messages and
+                // clear the agent's memory so future turns run on the
+                // compacted context. If no agent is available (pre-start)
+                // we only summarize locally.
+                let summary = compact_summary(&self.messages);
+                let removed = self.messages.len();
+                self.messages.clear();
+                self.messages.push(ConversationMessage {
+                    role: "system".to_string(),
+                    content: summary.clone(),
+                    ..Default::default()
+                });
+                if let Some(agent) = self.agent.as_mut() {
+                    if self.active_job.is_none() {
+                        let id = agent.model_id().to_string();
+                        *agent = Agent::new(&id);
+                    }
+                }
+                self.status = format!(
+                    "Compacted {removed} message(s) into a {} char summary",
+                    summary.len()
+                );
+            }
+            "reload" => {
+                // Registry is a one-shot statically loaded global; we can
+                // at least re-read the auth file and refresh the saved-key
+                // column for the login UI.
+                let _ = crate::auth::load_auth();
+                self.status = "Reloaded auth cache. (Provider TOMLs are loaded at process start.)".to_string();
+            }
+            "share" => {
+                self.status = "/share is not yet wired; use /export to produce an HTML transcript".to_string();
             }
             "quit" => {
-                // Set flag to exit on next iteration
                 self.status = "Exiting...".to_string();
-                // Force exit by triggering CtrlC twice logic
                 self.ctrl_c_count = 2;
             }
             _ => {
@@ -878,6 +1125,37 @@ impl InteractiveMode {
             }
         }
         Ok(())
+    }
+
+    /// Finalize the login key entry screen: write the provider + key
+    /// into `~/.pi/auth.json` and push the key onto the live agent if
+    /// we're currently on that provider.
+    fn finalize_login(&mut self) {
+        let provider_id = match self.login_provider_id.clone() {
+            Some(id) if id != "<logout>" => id,
+            _ => return,
+        };
+        let key = std::mem::take(&mut self.login_key_input);
+        if key.is_empty() {
+            self.status = "No key entered — cancelled".to_string();
+            return;
+        }
+        match crate::auth::set_key(&provider_id, &key) {
+            Ok(()) => {
+                // If the live agent is routing to this provider already,
+                // push the key in immediately so the next turn uses it.
+                if let Some(agent) = self.agent.as_mut() {
+                    let model = agent.model_id().to_string();
+                    if model.starts_with(&format!("{provider_id}/")) {
+                        agent.set_api_key(Some(key.clone()));
+                    }
+                }
+                self.status = format!("Saved {provider_id} key to auth.json");
+            }
+            Err(e) => {
+                self.status = format!("Could not save key: {e}");
+            }
+        }
     }
 
     /// Push a user message and spawn the agent turn in the background. The
@@ -931,6 +1209,15 @@ impl InteractiveMode {
         let model_filter = self.model_filter.clone();
         let settings_list = self.settings_list.clone();
         let settings_selected = self.settings_selected;
+        let login_list = self.login_list.clone();
+        let login_selected = self.login_selected;
+        let login_provider_id = self.login_provider_id.clone();
+        let login_key_len = self.login_key_input.chars().count();
+        let tree_rows = self.tree_rows.clone();
+        let tree_selected = self.tree_selected;
+        let thinking_options = self.thinking_options.clone();
+        let thinking_selected = self.thinking_selected;
+        let thinking_level = self.agent.as_ref().and_then(|a| a.thinking_level());
 
         // Footer inputs: pwd + branch on one line, token stats + model on
         // the next. These are resolved via the registry so they stay truthy
@@ -984,11 +1271,19 @@ impl InteractiveMode {
             let overlay_max_h = (size.height as f32 * 0.55) as u16;
             let overlay_active = palette_active
                 || display_mode == DisplayMode::ModelList
-                || display_mode == DisplayMode::SettingsList;
+                || display_mode == DisplayMode::SettingsList
+                || display_mode == DisplayMode::LoginList
+                || display_mode == DisplayMode::LoginKeyEntry
+                || display_mode == DisplayMode::TreeView
+                || display_mode == DisplayMode::ThinkingList;
             let overlay_height: u16 = if overlay_active {
                 match display_mode {
                     DisplayMode::ModelList => (model_list.len() as u16 + 3).min(overlay_max_h),
                     DisplayMode::SettingsList => (settings_list.len() as u16 + 3).min(overlay_max_h),
+                    DisplayMode::LoginList => (login_list.len() as u16 + 3).min(overlay_max_h),
+                    DisplayMode::LoginKeyEntry => 6,
+                    DisplayMode::TreeView => (tree_rows.len() as u16 + 3).min(overlay_max_h),
+                    DisplayMode::ThinkingList => (thinking_options.len() as u16 + 3).min(overlay_max_h),
                     _ if palette_active => (palette_items.len() as u16 + 3).min(overlay_max_h),
                     _ => 0,
                 }
@@ -1042,8 +1337,22 @@ impl InteractiveMode {
                     render_palette(&palette_items, palette_selected)
                 } else if display_mode == DisplayMode::ModelList {
                     render_model_list(&model_list, model_selected, &model_filter)
-                } else {
+                } else if display_mode == DisplayMode::SettingsList {
                     render_settings_list(&settings_list, settings_selected)
+                } else if display_mode == DisplayMode::LoginList {
+                    render_login_list(&login_list, login_selected)
+                } else if display_mode == DisplayMode::LoginKeyEntry {
+                    let provider_label = login_provider_id
+                        .as_deref()
+                        .unwrap_or("provider")
+                        .to_string();
+                    render_login_key_entry(&provider_label, login_key_len)
+                } else if display_mode == DisplayMode::TreeView {
+                    render_tree(&tree_rows, tree_selected)
+                } else if display_mode == DisplayMode::ThinkingList {
+                    render_thinking_list(&thinking_options, thinking_selected, thinking_level)
+                } else {
+                    Vec::new()
                 };
                 let para = Paragraph::new(overlay_lines).wrap(Wrap { trim: false });
                 frame.render_widget(para, overlay_area);
@@ -1642,6 +1951,392 @@ fn render_settings_list(rows: &[SettingInfo], selected: usize) -> Vec<Line<'stat
     }
     lines
 }
+
+// ----- LoginRow + build/render helpers + tree rows + thinking list + export
+
+#[derive(Clone, Debug)]
+pub struct LoginRow {
+    pub provider_id: String,
+    pub display_name: String,
+    pub source: String,
+    pub env_hint: String,
+}
+
+fn build_login_rows(
+    registry: &ModelRegistry,
+    saved: &std::collections::BTreeMap<String, String>,
+) -> Vec<LoginRow> {
+    let mut rows: Vec<LoginRow> = Vec::new();
+    for (id, provider) in registry.providers_iter() {
+        let env_hit = provider.resolve_env_key().map(|(var, _)| var);
+        let source = if let Some(var) = env_hit.clone() {
+            format!("env {var}")
+        } else if saved.contains_key(id) {
+            "auth.json".to_string()
+        } else {
+            "-".to_string()
+        };
+        let env_hint = if provider.env_vars.is_empty() {
+            "(no env var)".to_string()
+        } else {
+            provider.env_vars.join(", ")
+        };
+        rows.push(LoginRow {
+            provider_id: id.clone(),
+            display_name: if provider.display_name.is_empty() {
+                id.clone()
+            } else {
+                provider.display_name.clone()
+            },
+            source,
+            env_hint,
+        });
+    }
+    rows.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    rows
+}
+
+fn render_login_list(rows: &[LoginRow], selected: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Sign in ({} providers)", rows.len()),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    for (i, r) in rows.iter().enumerate() {
+        let is_sel = i == selected;
+        let prefix = if is_sel { "› " } else { "  " };
+        let name_style = if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let source_style = if r.source == "-" {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:<24}", r.display_name), name_style),
+            Span::raw("  "),
+            Span::styled(format!("{:<14}", r.source), source_style),
+            Span::raw("  "),
+            Span::styled(r.env_hint.clone(), dim_style()),
+        ]));
+    }
+    lines
+}
+
+fn render_login_key_entry(provider: &str, key_len: usize) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            format!("Sign in to {provider}"),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Paste your API key and press Enter. Esc to cancel.".to_string(),
+            dim_style(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("key › ".to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "*".repeat(key_len.min(48)),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                if key_len > 48 { format!(" ({} more)", key_len - 48) } else { String::new() },
+                dim_style(),
+            ),
+        ]),
+    ]
+}
+
+#[derive(Clone, Debug)]
+pub struct TreeRow {
+    pub depth: usize,
+    pub icon: String,
+    pub label: String,
+    pub hint: String,
+}
+
+fn build_tree_rows(messages: &[ConversationMessage]) -> Vec<TreeRow> {
+    let mut rows: Vec<TreeRow> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        let (icon, label) = match m.role.as_str() {
+            "user" => ("▶".to_string(), truncate_first_line(&m.content, 80)),
+            "assistant" => ("◀".to_string(), truncate_first_line(&m.content, 80)),
+            _ => ("·".to_string(), truncate_first_line(&m.content, 80)),
+        };
+        let hint = format!("#{i}");
+        rows.push(TreeRow { depth: 0, icon, label, hint });
+        for tc in &m.tool_calls {
+            let ok = if tc.is_error { "error" } else if tc.output.is_some() { "ok" } else { "…" };
+            rows.push(TreeRow {
+                depth: 1,
+                icon: "↪".to_string(),
+                label: format!("{} — {}", tc.name, tc.input_preview),
+                hint: ok.to_string(),
+            });
+        }
+    }
+    rows
+}
+
+fn truncate_first_line(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max {
+        line.to_string()
+    } else {
+        let truncated: String = line.chars().take(max).collect();
+        format!("{truncated}…")
+    }
+}
+
+fn render_tree(rows: &[TreeRow], selected: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Session tree ({} nodes)", rows.len()),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (transcript is empty)".to_string(),
+            dim_style(),
+        )));
+        return lines;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let is_sel = i == selected;
+        let indent = "  ".repeat(r.depth);
+        let prefix = if is_sel { "› " } else { "  " };
+        let label_style = if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
+            Span::raw(indent),
+            Span::styled(format!("{} ", r.icon), Style::default().fg(Color::Cyan)),
+            Span::styled(r.label.clone(), label_style),
+            Span::raw("  "),
+            Span::styled(r.hint.clone(), dim_style()),
+        ]));
+    }
+    lines
+}
+
+fn render_thinking_list(
+    options: &[&'static str],
+    selected: usize,
+    current: Option<pi_ai::types::ThinkingLevel>,
+) -> Vec<Line<'static>> {
+    let current_str = match current {
+        Some(pi_ai::types::ThinkingLevel::Minimal) => "minimal",
+        Some(pi_ai::types::ThinkingLevel::Low) => "low",
+        Some(pi_ai::types::ThinkingLevel::Medium) => "medium",
+        Some(pi_ai::types::ThinkingLevel::High) => "high",
+        Some(pi_ai::types::ThinkingLevel::Xhigh) => "xhigh",
+        None => "off",
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("Thinking level (current: {current_str})"),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ))];
+    for (i, opt) in options.iter().enumerate() {
+        let is_sel = i == selected;
+        let prefix = if is_sel { "› " } else { "  " };
+        let style = if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let marker = if *opt == current_str { " (active)" } else { "" };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(opt.to_string(), style),
+            Span::styled(marker.to_string(), dim_style()),
+        ]));
+    }
+    lines
+}
+
+fn thinking_level_from_label(label: &str) -> Option<pi_ai::types::ThinkingLevel> {
+    match label {
+        "off" => None,
+        "minimal" => Some(pi_ai::types::ThinkingLevel::Minimal),
+        "low" => Some(pi_ai::types::ThinkingLevel::Low),
+        "medium" => Some(pi_ai::types::ThinkingLevel::Medium),
+        "high" => Some(pi_ai::types::ThinkingLevel::High),
+        "xhigh" => Some(pi_ai::types::ThinkingLevel::Xhigh),
+        _ => None,
+    }
+}
+
+fn default_sessions_dir() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        home.join(".pi").join("sessions")
+    } else {
+        PathBuf::from(".pi/sessions")
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn export_conversation_html(messages: &[ConversationMessage], path: &Path) -> Result<()> {
+    let mut body = String::new();
+    for m in messages {
+        let role_class = match m.role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            _ => "system",
+        };
+        body.push_str(&format!("<section class=\"msg {role_class}\">\n"));
+        body.push_str(&format!(
+            "<header class=\"role\">{}</header>\n",
+            html_escape(&m.role)
+        ));
+        if !m.thinking.is_empty() {
+            body.push_str(&format!(
+                "<details class=\"thinking\"><summary>thinking</summary><pre>{}</pre></details>\n",
+                html_escape(&m.thinking)
+            ));
+        }
+        for tc in &m.tool_calls {
+            body.push_str("<div class=\"tool\">\n");
+            body.push_str(&format!(
+                "<div class=\"tool-name\">{}</div>\n",
+                html_escape(&tc.name)
+            ));
+            body.push_str(&format!(
+                "<pre class=\"tool-args\">{}</pre>\n",
+                html_escape(&tc.input_preview)
+            ));
+            if let Some(out) = &tc.output {
+                body.push_str(&format!(
+                    "<pre class=\"tool-out\">{}</pre>\n",
+                    html_escape(out)
+                ));
+            }
+            body.push_str("</div>\n");
+        }
+        if !m.content.is_empty() {
+            body.push_str(&format!(
+                "<div class=\"content\"><pre>{}</pre></div>\n",
+                html_escape(&m.content)
+            ));
+        }
+        body.push_str("</section>\n");
+    }
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>pi session {ts}</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; background: #0e1116; color: #e6edf3; padding: 1.5rem; max-width: 980px; margin: auto; }}
+.msg {{ border-top: 1px solid #30363d; padding: 1rem 0; }}
+.msg.user {{ background: rgba(128,200,255,0.05); }}
+.msg.assistant {{ background: rgba(128,255,200,0.03); }}
+.role {{ font-weight: 600; color: #79c0ff; margin-bottom: .5rem; text-transform: uppercase; font-size: .75rem; letter-spacing: .05em; }}
+pre {{ background: #161b22; padding: .75rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }}
+.tool-name {{ font-weight: 600; color: #7ee787; }}
+.tool-args {{ color: #d2a8ff; }}
+.tool-out {{ color: #c9d1d9; }}
+.thinking {{ color: #8b949e; }}
+header.page {{ color: #8b949e; font-size: .85rem; margin-bottom: 1rem; }}
+</style>
+</head><body>
+<header class="page">pi session — {ts} — {count} message(s)</header>
+{body}
+</body></html>
+"#,
+        ts = ts,
+        count = messages.len(),
+        body = body,
+    );
+    fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    fs::write(path, html)?;
+    Ok(())
+}
+
+fn copy_last_assistant(messages: &[ConversationMessage]) -> Result<usize> {
+    let last = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "assistant" && !m.content.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("no assistant message to copy"))?;
+    let text = last.content.clone();
+    let bytes = text.len();
+    let mut clip = arboard::Clipboard::new()
+        .map_err(|e| anyhow::anyhow!("clipboard unavailable: {e}"))?;
+    clip.set_text(text)
+        .map_err(|e| anyhow::anyhow!("clipboard write failed: {e}"))?;
+    Ok(bytes)
+}
+
+fn compact_summary(messages: &[ConversationMessage]) -> String {
+    let mut lines = Vec::new();
+    let mut tool_count = 0usize;
+    for m in messages {
+        if !m.tool_calls.is_empty() {
+            tool_count += m.tool_calls.len();
+        }
+        let role = match m.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            _ => "?",
+        };
+        let first = m.content.lines().next().unwrap_or("").trim();
+        if !first.is_empty() {
+            let clipped: String = first.chars().take(160).collect();
+            lines.push(format!("{role}: {clipped}"));
+        }
+    }
+    format!(
+        "[compact] {n} message(s), {t} tool call(s)\n{body}",
+        n = messages.len(),
+        t = tool_count,
+        body = lines.join("\n"),
+    )
+}
+
+fn save_transcript_json(messages: &[ConversationMessage], path: &Path, model: &str) -> Result<()> {
+    let msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "role": m.role,
+                "content": m.content,
+                "thinking": m.thinking,
+                "tool_calls": m.tool_calls.iter().map(|tc| serde_json::json!({
+                    "name": tc.name,
+                    "input_preview": tc.input_preview,
+                    "output": tc.output,
+                    "is_error": tc.is_error,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "id": chrono::Local::now().format("%Y%m%dT%H%M%S").to_string(),
+        "model": model,
+        "created": chrono::Local::now().to_rfc3339(),
+        "messages": msgs,
+    });
+    fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
 
 /// Short summary of a tool-call's JSON input for inline display. We
 /// surface the most useful single field for the common tools (bash,

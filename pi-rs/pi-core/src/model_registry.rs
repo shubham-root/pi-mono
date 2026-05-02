@@ -205,6 +205,12 @@ impl ModelRegistry {
         self.providers.values().map(|e| &e.provider)
     }
 
+    /// Iterate (provider_id, &Provider) pairs. Useful for UIs that want
+    /// to display the canonical id next to the human-readable name.
+    pub fn providers_iter(&self) -> impl Iterator<Item = (&String, &Provider)> {
+        self.providers.iter().map(|(id, e)| (id, &e.provider))
+    }
+
     pub fn provider(&self, id: &str) -> Option<&Provider> {
         self.providers.get(id).map(|e| &e.provider)
     }

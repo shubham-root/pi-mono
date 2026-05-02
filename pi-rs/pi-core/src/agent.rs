@@ -96,6 +96,11 @@ pub struct Agent {
     abort: Option<CancellationToken>,
     api_key: Option<String>,
     config: AgentConfig,
+    /// Reasoning effort forwarded to providers that support it
+    /// (openai o-series, claude extended thinking, deepseek, ...).
+    /// `None` means "provider default"; the TUI cycles between
+    /// `None`, `Low`, `Medium`, `High`.
+    thinking_level: Option<pi_ai::types::ThinkingLevel>,
 }
 
 impl Agent {
@@ -108,6 +113,7 @@ impl Agent {
             abort: None,
             api_key: None,
             config: AgentConfig::default(),
+            thinking_level: None,
         }
     }
 
@@ -153,6 +159,14 @@ impl Agent {
 
     pub fn has_api_key(&self) -> bool {
         self.api_key.as_deref().map(|s| !s.is_empty()).unwrap_or(false)
+    }
+
+    pub fn thinking_level(&self) -> Option<pi_ai::types::ThinkingLevel> {
+        self.thinking_level
+    }
+
+    pub fn set_thinking_level(&mut self, level: Option<pi_ai::types::ThinkingLevel>) {
+        self.thinking_level = level;
     }
 
     /// Convert tool registry into provider-agnostic ToolSchema list.
@@ -294,7 +308,7 @@ impl Agent {
                 cache_retention: None,
                 session_id: None,
                 headers: None,
-                reasoning_effort: None,
+                reasoning_effort: self.thinking_level,
                 thinking_budgets: None,
             };
 

@@ -11,6 +11,7 @@ pub mod session_picker;
 pub mod settings_ui;
 pub mod markdown;
 pub mod editor;
+pub mod auth;
 
 pub use print::PrintMode;
 pub use interactive::InteractiveMode;
