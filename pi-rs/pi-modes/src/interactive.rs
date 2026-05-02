@@ -348,6 +348,31 @@ pub struct InteractiveMode {
     /// executing.
     active_model_id_cache: String,
 
+    /// Total number of rendered conversation rows in the last drawn
+    /// frame. Updated at the end of each `draw()` call so mouse
+    /// handlers + scroll helpers can reason about the bar's range
+    /// without re-rendering the markdown.
+    messages_total_rows: usize,
+    /// Viewport height (rows) of the messages area in the last drawn
+    /// frame.
+    messages_viewport: usize,
+    /// Column x of the conversation scrollbar in the last drawn
+    /// frame, or `None` when no scrollbar is visible. Mouse clicks
+    /// compare against this to distinguish "scrollbar interaction"
+    /// from ordinary clicks in the message area.
+    scrollbar_col: Option<u16>,
+    /// Y bounds `(top, bottom_inclusive)` of the scrollbar track in
+    /// the last drawn frame.
+    scrollbar_y_range: Option<(u16, u16)>,
+    /// When `Some`, the user is mid-drag on the scrollbar thumb; we
+    /// keep tracking Drag events until they release.
+    scrollbar_dragging: bool,
+    /// When the user is scrolled away from the bottom, the footer
+    /// shows a clickable `↓ jump to latest` affordance. This holds
+    /// the (col_start, col_end, row) of the hitbox so mouse events
+    /// can snap-to-latest.
+    jump_bottom_hit: Option<(u16, u16, u16)>,
+
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
 
@@ -513,6 +538,12 @@ impl InteractiveMode {
             autocomplete_selected: 0,
             messages_scroll: 0,
             active_model_id_cache: initial_model,
+            messages_total_rows: 0,
+            messages_viewport: 0,
+            scrollbar_col: None,
+            scrollbar_y_range: None,
+            scrollbar_dragging: false,
+            jump_bottom_hit: None,
             sessions_dir: default_sessions_dir(),
             session_manager,
             current_session,
@@ -545,18 +576,22 @@ impl InteractiveMode {
                         true
                     }
                     AppEvent::Mouse(m) => {
-                        // Mouse wheel is the only mouse input we care
-                        // about today. When an overlay list is open,
-                        // wheel moves the selected row; otherwise it
-                        // scrolls the transcript. Three lines per tick
-                        // feels right for typical wheel granularity.
-                        use crossterm::event::MouseEventKind;
+                        use crossterm::event::{MouseButton, MouseEventKind};
                         match m.kind {
                             MouseEventKind::ScrollUp => {
                                 self.handle_scroll_up(3);
                             }
                             MouseEventKind::ScrollDown => {
                                 self.handle_scroll_down(3);
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                self.handle_mouse_press(m.column, m.row);
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                self.handle_mouse_drag(m.column, m.row);
+                            }
+                            MouseEventKind::Up(_) => {
+                                self.scrollbar_dragging = false;
                             }
                             _ => {}
                         }
@@ -1693,6 +1728,60 @@ impl InteractiveMode {
         }
     }
 
+    /// Click on the scrollbar track or jump-to-latest button. When
+    /// the click lands inside the scrollbar column of the messages
+    /// area, map the row to a scroll offset and put the handler into
+    /// "dragging" mode so subsequent `Drag` events keep updating the
+    /// offset. When it lands on the jump-to-latest hitbox, snap
+    /// `messages_scroll` to 0. All other clicks are currently
+    /// ignored (no selection-in-transcript yet).
+    fn handle_mouse_press(&mut self, col: u16, row: u16) {
+        if let Some((x0, x1, y)) = self.jump_bottom_hit {
+            if row == y && col >= x0 && col <= x1 {
+                self.messages_scroll = 0;
+                return;
+            }
+        }
+        if let (Some(sb_col), Some((y0, y1))) =
+            (self.scrollbar_col, self.scrollbar_y_range)
+        {
+            if col == sb_col && row >= y0 && row <= y1 {
+                self.set_scroll_from_bar_row(row, y0, y1);
+                self.scrollbar_dragging = true;
+            }
+        }
+    }
+
+    fn handle_mouse_drag(&mut self, _col: u16, row: u16) {
+        if !self.scrollbar_dragging {
+            return;
+        }
+        if let Some((y0, y1)) = self.scrollbar_y_range {
+            let row = row.clamp(y0, y1);
+            self.set_scroll_from_bar_row(row, y0, y1);
+        }
+    }
+
+    /// Given a mouse-cursor row on the scrollbar track (absolute
+    /// terminal coords) and the track bounds, update
+    /// `messages_scroll` so the clicked row aligns with the thumb
+    /// position proportionally. `messages_scroll` is measured from
+    /// the bottom (0 = latest), so the math inverts.
+    fn set_scroll_from_bar_row(&mut self, row: u16, y0: u16, y1: u16) {
+        let track_len = y1.saturating_sub(y0) as usize;
+        if track_len == 0
+            || self.messages_total_rows <= self.messages_viewport
+            || self.messages_viewport == 0
+        {
+            return;
+        }
+        let pos_from_top = (row.saturating_sub(y0)) as usize;
+        let max_scroll = self.messages_total_rows - self.messages_viewport;
+        let scaled = pos_from_top.saturating_mul(max_scroll) / track_len;
+        let scroll_up = max_scroll.saturating_sub(scaled);
+        self.messages_scroll = scroll_up;
+    }
+
     fn close_palette(&mut self) {
         self.palette_active = false;
         self.palette_items.clear();
@@ -2205,6 +2294,22 @@ impl InteractiveMode {
         };
         let first_turn = messages.is_empty() && !palette_active && display_mode == DisplayMode::Chat;
 
+        // Mutable trackers captured by the draw closure so mouse
+        // handlers can reason about scrollbar / jump-to-latest hit
+        // regions without re-running the draw. `terminal.draw`
+        // accepts an `Fn`, so we use `Cell`/`RefCell` interior
+        // mutability here.
+        use std::cell::Cell;
+        #[derive(Clone, Copy)]
+        struct MessagesFrame {
+            total: usize,
+            viewport: usize,
+            area: Rect,
+        }
+        let messages_frame: Cell<Option<MessagesFrame>> = Cell::new(None);
+        let scrollbar_hit_bounds: Cell<Option<(u16, u16, u16)>> = Cell::new(None);
+        let jump_bottom_bounds: Cell<Option<(u16, u16, u16)>> = Cell::new(None);
+
         self.event_loop.terminal().draw(|frame| {
             let size = frame.size();
             if size.height < 4 || size.width < 20 {
@@ -2311,13 +2416,24 @@ impl InteractiveMode {
                 frame.render_widget(para, msg_area);
             } else {
                 let lines = render_messages(&messages, show_thinking, show_tools);
-                // Pin the most recent messages to the BOTTOM of the
-                // messages area by default; honor `messages_scroll`
-                // (rows scrolled up from bottom) when set by mouse
-                // wheel / PageUp. The renderer clamps against the
-                // available lines.
+                // Shrink the effective message area by 1 column when
+                // there's content to scroll so the scrollbar has room
+                // on the right edge. When content fits in the
+                // viewport the bar is hidden and the full width is
+                // available for text.
                 let avail = msg_area.height as usize;
                 let total = lines.len();
+                let needs_bar = total > avail;
+                let content_area = if needs_bar {
+                    Rect {
+                        x: msg_area.x,
+                        y: msg_area.y,
+                        width: msg_area.width.saturating_sub(1),
+                        height: msg_area.height,
+                    }
+                } else {
+                    msg_area
+                };
                 let scroll_up = messages_scroll.min(total.saturating_sub(avail));
                 let slice: Vec<Line> = if total >= avail {
                     let end = total - scroll_up;
@@ -2330,7 +2446,65 @@ impl InteractiveMode {
                     out
                 };
                 let para = Paragraph::new(slice).wrap(Wrap { trim: false });
-                frame.render_widget(para, msg_area);
+                frame.render_widget(para, content_area);
+
+                // --- Vertical scrollbar on the right edge ---
+                if needs_bar {
+                    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
+                    // Map bottom-anchored `scroll_up` to ratatui's
+                    // top-anchored position: position 0 = top of
+                    // content, position = max = bottom. `content_length`
+                    // is the number of rows the user can scroll
+                    // through, i.e. `total - avail`.
+                    let max_scroll = total - avail;
+                    let position = max_scroll - scroll_up;
+                    let mut sb_state = ScrollbarState::new(max_scroll).position(position);
+                    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(Some("↑"))
+                        .end_symbol(Some("↓"))
+                        .track_style(Style::default().fg(Color::DarkGray))
+                        .thumb_style(Style::default().fg(Color::Cyan));
+                    let sb_area = Rect {
+                        x: msg_area.x + msg_area.width.saturating_sub(1),
+                        y: msg_area.y,
+                        width: 1,
+                        height: msg_area.height,
+                    };
+                    frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+                    scrollbar_hit_bounds.set(Some((sb_area.x, sb_area.y, sb_area.y + sb_area.height.saturating_sub(1))));
+                }
+
+                // --- Jump to latest affordance ---
+                // When the user has scrolled away from the bottom,
+                // overlay a small clickable hint at the bottom-right
+                // of the messages area so they can snap back to the
+                // live end without hunting for PgDn.
+                if scroll_up > 0 && msg_area.height > 0 && msg_area.width > 14 {
+                    let label = " \u{2193} jump to latest ";
+                    let label_w = label.chars().count() as u16;
+                    let x = msg_area.x + msg_area.width.saturating_sub(label_w + 1);
+                    let y = msg_area.y + msg_area.height - 1;
+                    let rect = Rect { x, y, width: label_w, height: 1 };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            label.to_string(),
+                            Style::default()
+                                .bg(Color::Indexed(236))
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ))),
+                        rect,
+                    );
+                    jump_bottom_bounds.set(Some((x, x + label_w - 1, y)));
+                }
+
+                // Remember dimensions so mouse handlers can translate
+                // clicks into scroll offsets without re-rendering.
+                messages_frame.set(Some(MessagesFrame {
+                    total,
+                    viewport: avail,
+                    area: msg_area,
+                }));
             }
 
             // ===== Overlay (command palette / model list / settings) =====
@@ -2627,6 +2801,19 @@ impl InteractiveMode {
                 Rect { x: 0, y: footer_stats_row, width: size.width, height: 1 },
             );
         })?;
+
+        // Export frame metrics for mouse handlers.
+        if let Some(mf) = messages_frame.get() {
+            self.messages_total_rows = mf.total;
+            self.messages_viewport = mf.viewport;
+        } else {
+            self.messages_total_rows = 0;
+            self.messages_viewport = 0;
+        }
+        let _ = messages_frame; // silence unused
+        self.scrollbar_col = scrollbar_hit_bounds.get().map(|(x, _, _)| x);
+        self.scrollbar_y_range = scrollbar_hit_bounds.get().map(|(_, y0, y1)| (y0, y1));
+        self.jump_bottom_hit = jump_bottom_bounds.get();
 
         Ok(())
     }
