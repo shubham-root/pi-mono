@@ -1,0 +1,36 @@
+[package]
+name = "pi-server"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-session daemon and IPC server for pi-rs"
+license = "MIT"
+
+[dependencies]
+# Workspace
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+# pi-*
+pi-ai = { path = "../pi-ai" }
+pi-core = { path = "../pi-core" }
+pi-tools = { path = "../pi-tools" }
+pi-plugin-host = { path = "../pi-plugin-host" }
+
+# IPC and networking
+tokio-stream = "0.1"
+tonic = "0.12"  # gRPC (optional, for future)
+prost = "0.13"
+
+# Unix sockets and file locking
+fd-lock = "4.0"
+unix_socket = "0.5"
+
+# OS-specific paths
+directories = "6.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }

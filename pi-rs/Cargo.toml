@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "pi-ai",
+    "pi-core",
+    "pi-tools",
+    "pi-cli",
+    "pi-modes",
+    "pi-tui",
+    "pi-plugin-host",
+    "pi-plugin-sdk",
+    "pi-server",
+]
+
+[workspace.dependencies]
+# Shared dependencies across crates
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+aws-sigv4 = "1.4"
+aws-credential-types = "1.2"
+http = "1.0"
+sha2 = "0.10"
+hmac = "0.12"
+url = "2.4"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"

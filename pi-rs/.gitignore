@@ -1,0 +1,37 @@
+# Rust
+target/
+**/target/
+Cargo.lock
+Cargo.workspace
+*.rlib
+*.so
+*.dylib
+*.dll
+*.exe
+pkg/
+wasm-pack.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Testing
+coverage/
+profiling/
+cargo-llvm-cov/
+
+# Cache
+.ragel/
+.taplo/

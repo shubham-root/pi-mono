@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install wasm32-wasip2 target
+        run: rustup target add wasm32-wasip2
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run cargo check
+        run: cargo check --workspace --all-targets
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test --workspace --all-targets --all-features
+      - name: Run cargo deny
+        run: cargo deny check
+
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check MSRV
+        run: |
+          cargo check --workspace --all-targets
+
+  cross-compile:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [
+          "x86_64-unknown-linux-musl",
+          "aarch64-unknown-linux-musl",
+          "x86_64-apple-darwin",
+          "aarch64-apple-darwin",
+          "x86_64-pc-windows-msvc",
+        ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cargo-zigbuild (for non-musl targets)
+        if: matrix.target == 'x86_64-apple-darwin' || matrix.target == 'aarch64-apple-darwin'
+        run: cargo install cargo-zigbuild --locked
+      - name: Build
+        run: |
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            cargo build --release --target ${{ matrix.target }}
+          elif [[ "${{ matrix.target }}" == *"darwin"* ]]; then
+            cargo zigbuild --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pi-rs-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/pi-rs*
+          retention-days: 7

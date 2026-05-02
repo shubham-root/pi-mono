@@ -1,0 +1,61 @@
+# cargo-deny configuration
+# Run: cargo deny check
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+ignore = [
+    # Add exceptions here if needed with RUSTSEC-XXXX-YYYY
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unlicense",
+]
+exceptions = [
+    # Allow specific dependencies under different licenses
+    { allow = ["Unicode-DFS-2016"], name = "unicode-ident" },
+]
+
+[[licenses.exceptions]]
+name = "ring"
+allow = ["ISC", "MIT", "OpenSSL"]
+
+[bans]
+multiple-versions = "warn"
+deny = [
+    { name = "openssl", feature = "vendored" },
+]
+skip = [
+    # Development dependencies
+    { name = " Diagnostic" },
+]
+
+[sources]
+unknown-git = "warn"
+unknown-registry = "warn"
+allow-git = [
+    # Example: allow specific git repos
+    # "https://github.com/example/repo",
+]

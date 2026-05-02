@@ -1,0 +1,21 @@
+[build]
+# Ensure reproducible builds
+rustflags = ["-C", "link-arg=-s"]
+
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = ["-C", "link-arg=-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = ["-C", "link-arg=-static"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dist]
+inherits = "release"
+opt-level = "z"  # Optimize for size
+debug = false

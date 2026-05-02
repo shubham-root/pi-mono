@@ -1,0 +1,62 @@
+# Clippy configuration
+# Run: cargo clippy --all-targets -- -D warnings
+
+[default]
+# Maximum complexity for function bodies
+max-complexity = 25
+# Maximum number of nested loops
+max-loops = 3
+# Maximum number of lines in a function
+max-line-length = 120
+
+# Result-based exceptions for common patterns
+too-many-arguments-threshold = 7
+too-many-lines-threshold = 200
+
+# Disallowed patterns
+disallowed-methods = [
+    "std::process::Command::new",  # Use tokio::process::Command instead
+]
+
+disallowed-types = [
+    "std::net::TcpStream",
+    "std::net::UdpSocket",
+    "std::sync::Mutex",  # Use tokio::sync::Mutex for async
+]
+
+# Lints to allow (common exceptions)
+allow = [
+    "needless_borrow",  # Sometimes needed for trait objects
+    "needless_question_mark",  # Sometimes useful for clarity
+    "unnecessary_wraps",  # Legacy code compatibility
+    "type_complexity",  # Complex types sometimes necessary
+]
+
+# Lints to warn on
+warn = [
+    "clippy::cargo",
+    "clippy::pedantic",
+    "clippy::nursery",
+    "clippy::all",
+]
+
+# Lints to deny (errors)
+deny = [
+    "clippy::undocumented_unsafe_blocks",
+    "clippy::unwrap_used",
+    "clippy::panic",
+    "clippy::expect_used",
+    "clippy::indexing_slicing",
+    "clippy::unimplemented",
+    "clippy::todo",
+    "clippy::dbg_macro",
+    "clippy::print_stdout",
+    "clippy::print_stderr",
+]
+
+[profile.dev]
+# Less strict in dev
+allow = [
+    "clippy::needless_return",
+    "clippy::needless_collect",
+]
