@@ -3174,7 +3174,13 @@ fn render_settings_list(
 /// One row rendered in the `/resume` session picker overlay.
 #[derive(Clone, Debug)]
 pub struct SessionBrowserRow {
+    /// Session UUID — still carried for `/resume` plumbing but no
+    /// longer shown as the primary label.
     pub id: String,
+    /// Human-readable title: first user message of the session,
+    /// newlines collapsed. Falls back to a short id when the
+    /// session has no user messages yet (e.g. just opened + quit).
+    pub title: String,
     pub model: String,
     pub message_count: usize,
     pub updated_at: String,
@@ -3188,16 +3194,31 @@ fn build_session_rows(
         .list_with_paths()
         .unwrap_or_default()
         .into_iter()
-        .map(|(m, p)| SessionBrowserRow {
-            id: p
+        .map(|(m, p)| {
+            let id = p
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "?".to_string()),
-            model: m.model,
-            message_count: m.message_count,
-            updated_at: m.updated_at,
-            file_path: p,
+                .unwrap_or_else(|| "?".to_string());
+            // Pull the first user message from the session JSONL so the
+            // picker surfaces the prompt the user opened with. TS shows
+            // `session.name ?? session.firstMessage` here; we don't
+            // have an explicit rename command yet so we just use
+            // firstMessage and fall back to the short id.
+            let title = pi_core::session::Session::load(&p)
+                .ok()
+                .and_then(|s| s.first_user_message())
+                .map(|t| t.replace(['\n', '\r', '\t'], " ").trim().to_string())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("(empty) {}", &id[..id.len().min(8)]));
+            SessionBrowserRow {
+                id,
+                title,
+                model: m.model,
+                message_count: m.message_count,
+                updated_at: m.updated_at,
+                file_path: p,
+            }
         })
         .collect()
 }
@@ -3218,18 +3239,23 @@ fn render_session_list(
         return (lines, None);
     }
     let mut selected_line: Option<usize> = None;
+    // Width budget for the title column. Left columns sum to 4 (prefix)
+    // and right columns sum to ~40 (msgs + timestamp + model). We
+    // reserve 48 for title with ellipsis so the layout stays stable
+    // across terminals as narrow as 100 cols.
+    const TITLE_WIDTH: usize = 48;
     for (i, r) in rows.iter().enumerate() {
         let is_sel = i == selected;
         if is_sel {
             selected_line = Some(lines.len());
         }
         let prefix = if is_sel { "› " } else { "  " };
-        let id_style = if is_sel {
+        let title_style = if is_sel {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Cyan)
         };
-        let short: String = r.id.chars().take(12).collect();
+        let title = ellipsize_middle(&r.title, TITLE_WIDTH);
         let ts = r
             .updated_at
             .split('.')
@@ -3238,7 +3264,7 @@ fn render_session_list(
             .replace('T', " ");
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:<14}", short), id_style),
+            Span::styled(format!("{:<TITLE_WIDTH$}", title), title_style),
             Span::raw("  "),
             Span::styled(format!("{:>4} msgs", r.message_count), muted_style()),
             Span::raw("  "),
@@ -3248,6 +3274,28 @@ fn render_session_list(
         ]));
     }
     (lines, selected_line)
+}
+
+/// Truncate `s` to fit in `width` display columns, using a middle
+/// ellipsis so both the beginning and the end of the string stay
+/// visible. Good default for titles where the first words give
+/// context and the tail often contains the differentiator.
+fn ellipsize_middle(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count <= width {
+        return s.to_string();
+    }
+    if width <= 1 {
+        return "…".to_string();
+    }
+    // Reserve 1 char for the ellipsis. Split remaining width so the
+    // head is slightly longer than the tail (more context up front).
+    let budget = width - 1;
+    let head_len = (budget + 1) / 2;
+    let tail_len = budget - head_len;
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s.chars().skip(count - tail_len).collect();
+    format!("{head}\u{2026}{tail}")
 }
 
 /// Replay a loaded `Session` into the TUI's `ConversationMessage`
@@ -4409,6 +4457,18 @@ mod tests {
         let filtered = filter_model_rows("claude", &rows);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model_id, "claude-opus-4");
+    }
+
+    #[test]
+    fn ellipsize_middle_preserves_head_and_tail() {
+        assert_eq!(ellipsize_middle("hello", 10), "hello");
+        assert_eq!(ellipsize_middle("hello world", 11), "hello world");
+        assert_eq!(ellipsize_middle("abcdef", 6), "abcdef");
+        let out = ellipsize_middle("this is a fairly long title about something cool", 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.contains('\u{2026}'));
+        assert!(out.starts_with("this"));
+        assert!(out.ends_with("cool"));
     }
 
     #[test]

@@ -252,6 +252,26 @@ impl Session {
         &self.entries
     }
 
+    /// First user-authored text content in this session. Used by the
+    /// `/resume` picker as a human-readable title when the session
+    /// hasn't been given an explicit name. Returns `None` for empty
+    /// sessions or sessions containing only assistant/tool blocks.
+    pub fn first_user_message(&self) -> Option<String> {
+        for msg in &self.messages {
+            if let Message::User(blocks) = msg {
+                for block in blocks {
+                    if let pi_ai::types::Content::Text { text, .. } = block {
+                        let t = text.trim();
+                        if !t.is_empty() {
+                            return Some(t.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Attach a file path without rewriting. Used when hydrating an
     /// existing session on `/resume` so subsequent `append_entry()`
     /// calls land in the same file.
@@ -712,6 +732,26 @@ mod tests {
         let resumed = mgr.continue_recent("fallback-model", "/a").unwrap();
         assert_eq!(resumed.id(), s_new.id());
         assert_ne!(resumed.id(), s_old.id());
+    }
+
+    #[test]
+    fn first_user_message_returns_earliest_user_text() {
+        let mut s = Session::new("m", "/c");
+        assert!(s.first_user_message().is_none());
+        s.add_message(Message::Assistant(vec![pi_ai::types::Content::Text {
+            text: "assistant speaks".to_string(),
+            cache_control: None,
+        }]));
+        assert!(s.first_user_message().is_none());
+        s.add_message(Message::User(vec![pi_ai::types::Content::Text {
+            text: "hello there friend".to_string(),
+            cache_control: None,
+        }]));
+        s.add_message(Message::User(vec![pi_ai::types::Content::Text {
+            text: "ignored second user message".to_string(),
+            cache_control: None,
+        }]));
+        assert_eq!(s.first_user_message().as_deref(), Some("hello there friend"));
     }
 
     #[test]
