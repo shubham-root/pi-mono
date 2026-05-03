@@ -334,12 +334,6 @@ pub struct InteractiveMode {
     autocomplete_items: Vec<crate::autocomplete::Suggestion>,
     autocomplete_selected: usize,
 
-    /// Number of visual rows the transcript is scrolled up from the
-    /// bottom. `0` means bottom-anchored (latest visible). Incremented
-    /// by mouse wheel up / PageUp; decremented by wheel down / PageDown.
-    /// Clamped in the renderer against the total transcript height.
-    messages_scroll: usize,
-
     /// Cached model id for display purposes. Kept in sync any time we
     /// know the agent's id; read by the footer even while
     /// `self.agent` is `None` (i.e. while a turn is in flight with
@@ -348,30 +342,24 @@ pub struct InteractiveMode {
     /// executing.
     active_model_id_cache: String,
 
-    /// Total number of rendered conversation rows in the last drawn
-    /// frame. Updated at the end of each `draw()` call so mouse
-    /// handlers + scroll helpers can reason about the bar's range
-    /// without re-rendering the markdown.
-    messages_total_rows: usize,
-    /// Viewport height (rows) of the messages area in the last drawn
-    /// frame.
-    messages_viewport: usize,
-    /// Column x of the conversation scrollbar in the last drawn
-    /// frame, or `None` when no scrollbar is visible. Mouse clicks
-    /// compare against this to distinguish "scrollbar interaction"
-    /// from ordinary clicks in the message area.
-    scrollbar_col: Option<u16>,
-    /// Y bounds `(top, bottom_inclusive)` of the scrollbar track in
-    /// the last drawn frame.
-    scrollbar_y_range: Option<(u16, u16)>,
-    /// When `Some`, the user is mid-drag on the scrollbar thumb; we
-    /// keep tracking Drag events until they release.
-    scrollbar_dragging: bool,
-    /// When the user is scrolled away from the bottom, the footer
-    /// shows a clickable `↓ jump to latest` affordance. This holds
-    /// the (col_start, col_end, row) of the hitbox so mouse events
-    /// can snap-to-latest.
-    jump_bottom_hit: Option<(u16, u16, u16)>,
+    /// Vestigial scroll offset. Native terminal scrollback handles
+    /// conversation history now, so this is always 0 except during
+    /// narrow UX corner cases (cleared on every `/new`, `send_message`,
+    /// etc.). Kept as a field so the helper call sites can compile
+    /// during the transition; safe to delete once all call sites
+    /// stop caring.
+    messages_scroll: usize,
+
+    /// Number of `messages` entries already promoted to the
+    /// terminal's native scrollback via `terminal.insert_before`.
+    /// Rendering only touches `messages[promoted_count..]` so
+    /// completed turns live in scrollback (native smooth scrolling)
+    /// and the inline viewport only shows the currently-streaming
+    /// turn (or nothing when idle).
+    promoted_count: usize,
+    /// Whether the startup banner has already been written to
+    /// scrollback. Prevents re-promoting on every frame.
+    banner_promoted: bool,
 
     // Cached sessions directory for save/fork
     sessions_dir: PathBuf,
@@ -538,12 +526,8 @@ impl InteractiveMode {
             autocomplete_selected: 0,
             messages_scroll: 0,
             active_model_id_cache: initial_model,
-            messages_total_rows: 0,
-            messages_viewport: 0,
-            scrollbar_col: None,
-            scrollbar_y_range: None,
-            scrollbar_dragging: false,
-            jump_bottom_hit: None,
+            promoted_count: 0,
+            banner_promoted: false,
             sessions_dir: default_sessions_dir(),
             session_manager,
             current_session,
@@ -559,6 +543,12 @@ impl InteractiveMode {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        // On the very first tick, promote the startup banner into
+        // the terminal's scrollback. It never re-renders inside the
+        // inline viewport, so it sits above the session in the
+        // user's terminal history.
+        self.promote_startup_banner_once();
+
         loop {
             // Drain keyboard/terminal events first so the UI stays
             // responsive. 20ms poll gives ~50 redraws/sec, enough for
@@ -576,25 +566,13 @@ impl InteractiveMode {
                         true
                     }
                     AppEvent::Mouse(m) => {
-                        use crossterm::event::{MouseButton, MouseEventKind};
-                        match m.kind {
-                            MouseEventKind::ScrollUp => {
-                                self.handle_scroll_up(3);
-                            }
-                            MouseEventKind::ScrollDown => {
-                                self.handle_scroll_down(3);
-                            }
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                self.handle_mouse_press(m.column, m.row);
-                            }
-                            MouseEventKind::Drag(MouseButton::Left) => {
-                                self.handle_mouse_drag(m.column, m.row);
-                            }
-                            MouseEventKind::Up(_) => {
-                                self.scrollbar_dragging = false;
-                            }
-                            _ => {}
-                        }
+                        // Mouse capture is intentionally disabled so the
+                        // terminal can handle wheel events natively for
+                        // scrollback. In practice we shouldn't receive
+                        // mouse events at all. If we do (some terminals
+                        // send them anyway), ignore them so nothing is
+                        // hijacked from the terminal's own scroll UI.
+                        let _ = m;
                         true
                     }
                     _ => true,
@@ -761,6 +739,12 @@ impl InteractiveMode {
                 self.pending_steering = 0;
                 self.pending_followup = 0;
 
+                // Promote everything up to (and including) this turn's
+                // last message into the terminal's native scrollback.
+                // After this the inline viewport is clean and the
+                // user's terminal handles scrolling through history.
+                self.promote_pending_messages_to_scrollback();
+
                 if let Some(next) = self.queued_messages.pop() {
                     self.spawn_prompt(next);
                 }
@@ -771,6 +755,7 @@ impl InteractiveMode {
                 self.current_assistant_index = None;
                 self.pending_steering = 0;
                 self.pending_followup = 0;
+                self.promote_pending_messages_to_scrollback();
             }
         }
     }
@@ -1220,6 +1205,13 @@ impl InteractiveMode {
                                 self.active_model_id_cache =
                                     session.metadata().model.clone();
                                 self.messages = replay;
+                                // Resume promotes the whole loaded
+                                // transcript into scrollback so the
+                                // user's terminal history mirrors the
+                                // session file. Subsequent turns
+                                // append on top.
+                                self.promoted_count = 0;
+                                self.promote_pending_messages_to_scrollback();
                                 self.messages_scroll = 0;
                                 self.usage = UsageStats::default();
                                 self.last_call = None;
@@ -1728,58 +1720,62 @@ impl InteractiveMode {
         }
     }
 
-    /// Click on the scrollbar track or jump-to-latest button. When
-    /// the click lands inside the scrollbar column of the messages
-    /// area, map the row to a scroll offset and put the handler into
-    /// "dragging" mode so subsequent `Drag` events keep updating the
-    /// offset. When it lands on the jump-to-latest hitbox, snap
-    /// `messages_scroll` to 0. All other clicks are currently
-    /// ignored (no selection-in-transcript yet).
-    fn handle_mouse_press(&mut self, col: u16, row: u16) {
-        if let Some((x0, x1, y)) = self.jump_bottom_hit {
-            if row == y && col >= x0 && col <= x1 {
-                self.messages_scroll = 0;
-                return;
-            }
-        }
-        if let (Some(sb_col), Some((y0, y1))) =
-            (self.scrollbar_col, self.scrollbar_y_range)
-        {
-            if col == sb_col && row >= y0 && row <= y1 {
-                self.set_scroll_from_bar_row(row, y0, y1);
-                self.scrollbar_dragging = true;
-            }
-        }
-    }
-
-    fn handle_mouse_drag(&mut self, _col: u16, row: u16) {
-        if !self.scrollbar_dragging {
+    /// Promote any not-yet-promoted entries in `self.messages` to
+    /// the terminal's native scrollback via
+    /// `Terminal::insert_before`. The messages render via the same
+    /// `render_messages` helper the inline viewport uses, so the
+    /// visual formatting matches exactly. After a successful
+    /// promotion the inline viewport is clean on the next frame
+    /// because the draw loop only touches `messages[promoted_count..]`.
+    fn promote_pending_messages_to_scrollback(&mut self) {
+        if self.promoted_count >= self.messages.len() {
             return;
         }
-        if let Some((y0, y1)) = self.scrollbar_y_range {
-            let row = row.clamp(y0, y1);
-            self.set_scroll_from_bar_row(row, y0, y1);
-        }
-    }
-
-    /// Given a mouse-cursor row on the scrollbar track (absolute
-    /// terminal coords) and the track bounds, update
-    /// `messages_scroll` so the clicked row aligns with the thumb
-    /// position proportionally. `messages_scroll` is measured from
-    /// the bottom (0 = latest), so the math inverts.
-    fn set_scroll_from_bar_row(&mut self, row: u16, y0: u16, y1: u16) {
-        let track_len = y1.saturating_sub(y0) as usize;
-        if track_len == 0
-            || self.messages_total_rows <= self.messages_viewport
-            || self.messages_viewport == 0
-        {
+        let pending: Vec<ConversationMessage> = self
+            .messages
+            .iter()
+            .skip(self.promoted_count)
+            .cloned()
+            .collect();
+        let show_thinking = self.show_thinking;
+        let show_tools = self.show_tools;
+        let lines = render_messages(&pending, show_thinking, show_tools);
+        if lines.is_empty() {
+            self.promoted_count = self.messages.len();
             return;
         }
-        let pos_from_top = (row.saturating_sub(y0)) as usize;
-        let max_scroll = self.messages_total_rows - self.messages_viewport;
-        let scaled = pos_from_top.saturating_mul(max_scroll) / track_len;
-        let scroll_up = max_scroll.saturating_sub(scaled);
-        self.messages_scroll = scroll_up;
+        // Ratatui's `insert_before` allocates a buffer of exactly
+        // the requested height, so long lines that wrap must be
+        // counted BEFORE the call — otherwise `Paragraph::render`
+        // panics writing past the end. We over-count slightly to
+        // be safe on wide unicode.
+        let width = self.event_loop.terminal().size().0;
+        let height = estimate_wrapped_rows(&lines, width);
+        let term = self.event_loop.terminal();
+        let _ = term.insert_before(height, move |buf| {
+            let area = buf.area;
+            let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+            p.render(area, buf);
+        });
+        self.promoted_count = self.messages.len();
+    }
+
+    fn promote_startup_banner_once(&mut self) {
+        if self.banner_promoted {
+            return;
+        }
+        let lines = render_startup_banner();
+        if !lines.is_empty() {
+            let width = self.event_loop.terminal().size().0;
+            let height = estimate_wrapped_rows(&lines, width);
+            let term = self.event_loop.terminal();
+            let _ = term.insert_before(height, move |buf| {
+                let area = buf.area;
+                let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+                p.render(area, buf);
+            });
+        }
+        self.banner_promoted = true;
     }
 
     fn close_palette(&mut self) {
@@ -1895,6 +1891,13 @@ impl InteractiveMode {
                 self.messages_scroll = 0;
                 self.pending_steering = 0;
                 self.pending_followup = 0;
+                // The scrollback above the inline viewport still
+                // shows the previous conversation as terminal
+                // history — users can scroll up to re-read it.
+                // Reset the promotion cursor to 0 so new messages
+                // (from turn #1 of the fresh session) again flow
+                // into scrollback on completion.
+                self.promoted_count = 0;
                 if self.active_job.is_some() {
                     self.status =
                         "Wait for the current turn to finish before starting a new session"
@@ -2253,6 +2256,7 @@ impl InteractiveMode {
         let autocomplete_kind = self.autocomplete_kind;
         let last_call = self.last_call.clone();
         let messages_scroll = self.messages_scroll;
+        let promoted_count = self.promoted_count;
 
         // Footer inputs: pwd + branch on one line, token stats + model on
         // the next. These are resolved via the registry so they stay truthy
@@ -2294,21 +2298,13 @@ impl InteractiveMode {
         };
         let first_turn = messages.is_empty() && !palette_active && display_mode == DisplayMode::Chat;
 
-        // Mutable trackers captured by the draw closure so mouse
-        // handlers can reason about scrollbar / jump-to-latest hit
-        // regions without re-running the draw. `terminal.draw`
-        // accepts an `Fn`, so we use `Cell`/`RefCell` interior
-        // mutability here.
+        // Mutable trackers captured by the draw closure. Today we
+        // only need these for overlay positioning and there's
+        // nothing external to read back, but leaving the `Cell`
+        // pattern in place makes future additions (tooltips,
+        // selection regions, etc.) straightforward.
         use std::cell::Cell;
-        #[derive(Clone, Copy)]
-        struct MessagesFrame {
-            total: usize,
-            viewport: usize,
-            area: Rect,
-        }
-        let messages_frame: Cell<Option<MessagesFrame>> = Cell::new(None);
-        let scrollbar_hit_bounds: Cell<Option<(u16, u16, u16)>> = Cell::new(None);
-        let jump_bottom_bounds: Cell<Option<(u16, u16, u16)>> = Cell::new(None);
+        let _: Cell<()> = Cell::new(());
 
         self.event_loop.terminal().draw(|frame| {
             let size = frame.size();
@@ -2316,10 +2312,19 @@ impl InteractiveMode {
                 return;
             }
 
+            // In inline-viewport mode `size` is the buffer area,
+            // which has a nonzero `y` (the top of the viewport
+            // inside the terminal). All subsequent absolute-row
+            // calculations translate through `size.y`; `bottom()` is
+            // an exclusive bound so `bottom() - 1` is the last
+            // writable row.
+            let viewport_top = size.y;
+            let viewport_bottom_excl = size.y + size.height;
+
             // -------- Bottom 3 rows: footer --------
-            let footer_stats_row = size.height - 1;  // tokens + model
-            let footer_pwd_row = size.height - 2;    // pwd (branch)
-            let hint_row = size.height - 3;          // key hints + status
+            let footer_stats_row = viewport_bottom_excl - 1; // tokens + model
+            let footer_pwd_row = viewport_bottom_excl - 2;   // pwd (branch)
+            let hint_row = viewport_bottom_excl - 3;         // key hints + status
 
             // -------- Input textbox (bracketed by horizontal rules) --------
             // Max 7 *visual* rows; beyond that the viewport scrolls so
@@ -2402,43 +2407,47 @@ impl InteractiveMode {
             let overlay_top = last_call_row.saturating_sub(overlay_height);
 
             // -------- Messages area: top down to overlay / call-info row --------
+            // Height is the distance between the viewport top and
+            // wherever the overlay / call-info row lives; y anchors
+            // to the viewport top (nonzero in inline mode).
+            let msg_height = overlay_top.saturating_sub(viewport_top);
             let msg_area = Rect {
                 x: 0,
-                y: 0,
+                y: viewport_top,
                 width: size.width,
-                height: overlay_top,
+                height: msg_height,
             };
 
             // ===== Messages / startup banner =====
             if first_turn {
-                let lines = render_startup_banner();
-                let para = Paragraph::new(lines).wrap(Wrap { trim: false });
-                frame.render_widget(para, msg_area);
+                // The banner was already promoted to scrollback in
+                // `run()` via `promote_startup_banner_once`, so the
+                // inline viewport just leaves the message area empty
+                // until the user sends something. This prevents the
+                // banner from rendering twice (once above, once in
+                // the viewport).
             } else {
-                let lines = render_messages(&messages, show_thinking, show_tools);
-                // Shrink the effective message area by 1 column when
-                // there's content to scroll so the scrollbar has room
-                // on the right edge. When content fits in the
-                // viewport the bar is hidden and the full width is
-                // available for text.
+                // Only render messages that haven't been promoted to
+                // the terminal's native scrollback yet. When idle
+                // this is usually empty — completed turns live in
+                // the scrollback above the inline viewport. While a
+                // turn is streaming, the live assistant bubble
+                // renders here and gets promoted on completion.
+                let live_messages: Vec<ConversationMessage> = messages
+                    .iter()
+                    .skip(promoted_count)
+                    .cloned()
+                    .collect();
+                let lines = render_messages(&live_messages, show_thinking, show_tools);
+                // If the live content is taller than the available
+                // msg_area, show the tail (newest tokens at the
+                // bottom). Older content will land in scrollback on
+                // completion via `insert_before`, so tail clipping
+                // here is temporary.
                 let avail = msg_area.height as usize;
                 let total = lines.len();
-                let needs_bar = total > avail;
-                let content_area = if needs_bar {
-                    Rect {
-                        x: msg_area.x,
-                        y: msg_area.y,
-                        width: msg_area.width.saturating_sub(1),
-                        height: msg_area.height,
-                    }
-                } else {
-                    msg_area
-                };
-                let scroll_up = messages_scroll.min(total.saturating_sub(avail));
-                let slice: Vec<Line> = if total >= avail {
-                    let end = total - scroll_up;
-                    let start = end.saturating_sub(avail);
-                    lines[start..end].to_vec()
+                let slice: Vec<Line> = if total > avail {
+                    lines[total - avail..].to_vec()
                 } else {
                     let pad = avail - total;
                     let mut out: Vec<Line> = (0..pad).map(|_| Line::from("")).collect();
@@ -2446,65 +2455,7 @@ impl InteractiveMode {
                     out
                 };
                 let para = Paragraph::new(slice).wrap(Wrap { trim: false });
-                frame.render_widget(para, content_area);
-
-                // --- Vertical scrollbar on the right edge ---
-                if needs_bar {
-                    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
-                    // Map bottom-anchored `scroll_up` to ratatui's
-                    // top-anchored position: position 0 = top of
-                    // content, position = max = bottom. `content_length`
-                    // is the number of rows the user can scroll
-                    // through, i.e. `total - avail`.
-                    let max_scroll = total - avail;
-                    let position = max_scroll - scroll_up;
-                    let mut sb_state = ScrollbarState::new(max_scroll).position(position);
-                    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                        .begin_symbol(Some("↑"))
-                        .end_symbol(Some("↓"))
-                        .track_style(Style::default().fg(Color::DarkGray))
-                        .thumb_style(Style::default().fg(Color::Cyan));
-                    let sb_area = Rect {
-                        x: msg_area.x + msg_area.width.saturating_sub(1),
-                        y: msg_area.y,
-                        width: 1,
-                        height: msg_area.height,
-                    };
-                    frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
-                    scrollbar_hit_bounds.set(Some((sb_area.x, sb_area.y, sb_area.y + sb_area.height.saturating_sub(1))));
-                }
-
-                // --- Jump to latest affordance ---
-                // When the user has scrolled away from the bottom,
-                // overlay a small clickable hint at the bottom-right
-                // of the messages area so they can snap back to the
-                // live end without hunting for PgDn.
-                if scroll_up > 0 && msg_area.height > 0 && msg_area.width > 14 {
-                    let label = " \u{2193} jump to latest ";
-                    let label_w = label.chars().count() as u16;
-                    let x = msg_area.x + msg_area.width.saturating_sub(label_w + 1);
-                    let y = msg_area.y + msg_area.height - 1;
-                    let rect = Rect { x, y, width: label_w, height: 1 };
-                    frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            label.to_string(),
-                            Style::default()
-                                .bg(Color::Indexed(236))
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ))),
-                        rect,
-                    );
-                    jump_bottom_bounds.set(Some((x, x + label_w - 1, y)));
-                }
-
-                // Remember dimensions so mouse handlers can translate
-                // clicks into scroll offsets without re-rendering.
-                messages_frame.set(Some(MessagesFrame {
-                    total,
-                    viewport: avail,
-                    area: msg_area,
-                }));
+                frame.render_widget(para, msg_area);
             }
 
             // ===== Overlay (command palette / model list / settings) =====
@@ -2801,19 +2752,6 @@ impl InteractiveMode {
                 Rect { x: 0, y: footer_stats_row, width: size.width, height: 1 },
             );
         })?;
-
-        // Export frame metrics for mouse handlers.
-        if let Some(mf) = messages_frame.get() {
-            self.messages_total_rows = mf.total;
-            self.messages_viewport = mf.viewport;
-        } else {
-            self.messages_total_rows = 0;
-            self.messages_viewport = 0;
-        }
-        let _ = messages_frame; // silence unused
-        self.scrollbar_col = scrollbar_hit_bounds.get().map(|(x, _, _)| x);
-        self.scrollbar_y_range = scrollbar_hit_bounds.get().map(|(_, y0, y1)| (y0, y1));
-        self.jump_bottom_hit = jump_bottom_bounds.get();
 
         Ok(())
     }
@@ -3978,6 +3916,30 @@ fn pin_model_to_project(model_id: &str) -> Result<PathBuf> {
     settings.model = Some(model_id.to_string());
     settings.save_project(&cwd)?;
     Ok(project_dir.join("config.toml"))
+}
+
+/// Estimate how many rows a set of `Line`s will occupy once wrapped
+/// at `width`. Used before `Terminal::insert_before` to size the
+/// scrollback buffer; ratatui's `Paragraph::line_count` is private
+/// as of 0.27 so we approximate by dividing each line's visible
+/// width by the terminal width and rounding up. Empty lines still
+/// contribute one row.
+fn estimate_wrapped_rows(lines: &[Line<'_>], width: u16) -> u16 {
+    let width = (width as usize).max(1);
+    let mut rows: usize = 0;
+    for line in lines {
+        let content_width: usize = line
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        if content_width == 0 {
+            rows += 1;
+        } else {
+            rows += content_width.div_ceil(width);
+        }
+    }
+    rows.min(u16::MAX as usize) as u16
 }
 
 fn default_sessions_dir() -> PathBuf {
