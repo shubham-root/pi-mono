@@ -591,11 +591,21 @@ fn build_bedrock_event_stream(
         model_id: String,
         // block_index -> (tool_use_id, name, accumulated_json)
         tool_blocks: HashMap<u32, (String, String, String)>,
+        /// Bedrock emits `messageStop` BEFORE `metadata` (which
+        /// carries usage). The agent loop breaks on `Stop`, so
+        /// we buffer the stop reason here and flush it AFTER the
+        /// usage event is emitted (or at stream end). This makes
+        /// the event order observed downstream: ...deltas...,
+        /// Usage, Stop — matching Anthropic/OpenAI semantics and
+        /// ensuring the TUI's `AgentEvent::Usage` handler runs
+        /// before the turn completes.
+        pending_stop: Option<String>,
     }
     let state = State {
         decoder: EventStreamDecoder::new(),
         model_id,
         tool_blocks: HashMap::new(),
+        pending_stop: None,
     };
 
     // Pin the byte stream before handing it to `unfold` so it can be
@@ -621,7 +631,12 @@ fn build_bedrock_event_stream(
             match state.decoder.next_message() {
                 Err(e) => return Some((Err(e), (byte_stream, state, pending, true))),
                 Ok(Some(msg)) => {
-                    match decode_bedrock_message(&msg, &mut state.tool_blocks, &state.model_id) {
+                    match decode_bedrock_message(
+                        &msg,
+                        &mut state.tool_blocks,
+                        &mut state.pending_stop,
+                        &state.model_id,
+                    ) {
                         Ok(events) => {
                             // Reverse so popping yields in order.
                             pending.extend(events.into_iter().rev());
@@ -633,7 +648,6 @@ fn build_bedrock_event_stream(
                     }
                 }
                 Ok(None) => {
-                    // Need more bytes.
                     use futures::StreamExt;
                     match byte_stream.next().await {
                         Some(Ok(chunk)) => {
@@ -647,6 +661,19 @@ fn build_bedrock_event_stream(
                             ));
                         }
                         None => {
+                            // Stream ended. If we buffered a Stop
+                            // while waiting for a metadata event that
+                            // never arrived, flush it now so the
+                            // agent loop terminates cleanly.
+                            if let Some(reason) = state.pending_stop.take() {
+                                return Some((
+                                    Ok(StreamEvent::Stop {
+                                        stop_reason: reason,
+                                        stop_sequence: None,
+                                    }),
+                                    (byte_stream, state, pending, true),
+                                ));
+                            }
                             done = true;
                             continue;
                         }
@@ -660,6 +687,7 @@ fn build_bedrock_event_stream(
 fn decode_bedrock_message(
     msg: &crate::providers::eventstream::EventStreamMessage,
     tool_blocks: &mut std::collections::HashMap<u32, (String, String, String)>,
+    pending_stop: &mut Option<String>,
     model_id: &str,
 ) -> Result<Vec<StreamEvent>> {
     let Some(event_type) = msg.event_type() else {
@@ -731,6 +759,10 @@ fn decode_bedrock_message(
             Ok(Vec::new())
         }
         "messageStop" => {
+            // Buffer the stop reason and wait for the metadata
+            // event (usage) before emitting it. The agent loop
+            // breaks on `Stop`, so emitting Stop here would hide
+            // the usage event that Bedrock sends AFTER this one.
             let v: serde_json::Value = serde_json::from_slice(&msg.payload)
                 .unwrap_or_else(|_| serde_json::json!({}));
             let stop_reason = v
@@ -738,10 +770,8 @@ fn decode_bedrock_message(
                 .and_then(|x| x.as_str())
                 .unwrap_or("end_turn")
                 .to_string();
-            Ok(vec![StreamEvent::Stop {
-                stop_reason,
-                stop_sequence: None,
-            }])
+            *pending_stop = Some(stop_reason);
+            Ok(Vec::new())
         }
         "metadata" => {
             let v: serde_json::Value = serde_json::from_slice(&msg.payload)
@@ -750,7 +780,7 @@ fn decode_bedrock_message(
             let input = usage.get("inputTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
             let output = usage.get("outputTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
             let total = usage.get("totalTokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-            Ok(vec![StreamEvent::Usage {
+            let mut events = vec![StreamEvent::Usage {
                 usage: crate::types::Usage {
                     input_tokens: input,
                     output_tokens: output,
@@ -759,7 +789,16 @@ fn decode_bedrock_message(
                     cache_write_tokens: None,
                     cost: None,
                 },
-            }])
+            }];
+            // Flush the buffered Stop now that usage has been
+            // delivered to the consumer.
+            if let Some(reason) = pending_stop.take() {
+                events.push(StreamEvent::Stop {
+                    stop_reason: reason,
+                    stop_sequence: None,
+                });
+            }
+            Ok(events)
         }
         // Error / exception events. Bedrock wraps these in specific
         // event-types like "validationException", "throttlingException",
