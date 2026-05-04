@@ -2520,9 +2520,15 @@ impl InteractiveMode {
                     }
                     _ => 0u16,
                 };
-                let para = Paragraph::new(overlay_lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((scroll, 0));
+                // Overlay content is hand-sized to fit the
+                // viewport width (see `render_session_list` /
+                // `render_model_list` etc.), and our scroll math
+                // assumes one logical line renders as one visual
+                // row. Ratatui's wrap-true would violate that on
+                // extra-narrow terminals and the selected row would
+                // fall out of view. Drop wrap so long rows clip at
+                // the right edge instead.
+                let para = Paragraph::new(overlay_lines).scroll((scroll, 0));
                 frame.render_widget(para, overlay_area);
             }
 
@@ -3437,6 +3443,7 @@ fn render_session_list(
     // reserve 48 for title with ellipsis so the layout stays stable
     // across terminals as narrow as 100 cols.
     const TITLE_WIDTH: usize = 48;
+    const MODEL_COL_WIDTH: usize = 28;
     for (i, r) in rows.iter().enumerate() {
         let is_sel = i == selected;
         if is_sel {
@@ -3463,7 +3470,16 @@ fn render_session_list(
             Span::raw("  "),
             Span::styled(ts, dim_style()),
             Span::raw("  "),
-            Span::styled(r.model.clone(), dim_style()),
+            // Truncate the model id to a fixed width so every row
+            // fits on a single visual line at typical terminal
+            // widths. Ratatui's Paragraph wraps by default, and our
+            // overlay scroll math is per-logical-line — so a row
+            // that visually occupies 2 rows makes the selected
+            // highlight fall out of view when the user scrolls.
+            Span::styled(
+                ellipsize_middle(&r.model, MODEL_COL_WIDTH),
+                dim_style(),
+            ),
         ]));
     }
     (lines, selected_line)
