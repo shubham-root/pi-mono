@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 
 /// Main CLI arguments.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(name = "pi-rs")]
 #[clap(about = "pi - AI coding agent")]
 #[clap(long_about = None)]
@@ -41,6 +41,17 @@ pub struct Cli {
     #[clap(long)]
     pub plugin: Vec<String>,
 
+    /// Additional skill path (file or directory). Repeatable. Each
+    /// entry is added to the skill set loaded at startup, even when
+    /// `--no-skills` is set.
+    #[clap(long)]
+    pub skill: Vec<String>,
+
+    /// Disable default skill discovery (global and project).
+    /// Explicit `--skill <path>` entries still load.
+    #[clap(long)]
+    pub no_skills: bool,
+
     /// Run in single-process mode (no daemon)
     #[clap(long)]
     pub no_daemon: bool,
@@ -73,7 +84,7 @@ pub struct Cli {
 }
 
 /// Available subcommands.
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Print a single response
     Print {
@@ -124,7 +135,7 @@ pub enum Commands {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ServerSubcommand {
     Start,
     Stop,
@@ -132,7 +143,7 @@ pub enum ServerSubcommand {
     Logs,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum PluginSubcommand {
     Install {
         name: String,

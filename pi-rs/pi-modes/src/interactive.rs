@@ -48,6 +48,7 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
         SlashCommand { name: "thinking".to_string(), description: "Set reasoning level".to_string() },
         SlashCommand { name: "copy".to_string(), description: "Copy last assistant message".to_string() },
         SlashCommand { name: "reload".to_string(), description: "Reload config and extensions".to_string() },
+        SlashCommand { name: "skills".to_string(), description: "List loaded skills".to_string() },
         SlashCommand { name: "quit".to_string(), description: "Exit pi".to_string() },
     ]
 }
@@ -55,6 +56,18 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
 fn filter_commands(query: &str, all: &[SlashCommand]) -> Vec<SlashCommand> {
     let q = query.to_lowercase();
     all.iter().filter(|cmd| cmd.name.contains(&q)).cloned().collect()
+}
+
+/// Clip `s` to `max` chars, appending a single character ellipsis
+/// when truncated. Used to keep skill descriptions one-line in the
+/// palette.
+fn truncate_one_liner(s: &str, max: usize) -> String {
+    let oneline = s.lines().next().unwrap_or("").trim();
+    if oneline.chars().count() <= max {
+        return oneline.to_string();
+    }
+    let truncated: String = oneline.chars().take(max - 1).collect();
+    format!("{truncated}\u{2026}")
 }
 
 /// Flattened model entry for display (includes provider display name + id).
@@ -350,6 +363,12 @@ pub struct InteractiveMode {
     /// stop caring.
     messages_scroll: usize,
 
+    /// Skills available for this session. Populated via
+    /// `set_skills` at startup from the resource loader. Used by
+    /// `/skill:<name>` expansion and the slash-command
+    /// autocomplete menu.
+    skills: Vec<pi_core::skills::Skill>,
+
     /// Number of `messages` entries already promoted to the
     /// terminal's native scrollback via `terminal.insert_before`.
     /// Rendering only touches `messages[promoted_count..]` so
@@ -525,6 +544,7 @@ impl InteractiveMode {
             autocomplete_items: Vec::new(),
             autocomplete_selected: 0,
             messages_scroll: 0,
+            skills: Vec::new(),
             active_model_id_cache: initial_model,
             promoted_count: 0,
             banner_promoted: false,
@@ -2125,11 +2145,74 @@ impl InteractiveMode {
                 self.status = "Exiting...".to_string();
                 self.should_exit = true;
             }
+            "skills" => {
+                // Surface the currently-loaded skill set as an
+                // info row. Useful for verifying `--skill`, settings
+                // and discovery at a glance. Hidden skills (with
+                // `disable-model-invocation: true`) are flagged so
+                // users know the model can't see them on its own.
+                if self.skills.is_empty() {
+                    self.messages.push(ConversationMessage {
+                        role: "system".to_string(),
+                        content: "No skills loaded. Drop a SKILL.md into `~/.pi/agent/skills/<name>/` or `.pi/skills/<name>/`, or pass `--skill <path>` on the CLI.".to_string(),
+                        ..Default::default()
+                    });
+                } else {
+                    let mut out = format!("Loaded {} skill(s):\n", self.skills.len());
+                    for s in &self.skills {
+                        let flag = if s.disable_model_invocation {
+                            " [hidden from model]"
+                        } else {
+                            ""
+                        };
+                        out.push_str(&format!(
+                            "  /skill:{}{}  — {}\n",
+                            s.name, flag, s.description
+                        ));
+                    }
+                    self.messages.push(ConversationMessage {
+                        role: "system".to_string(),
+                        content: out.trim_end().to_string(),
+                        ..Default::default()
+                    });
+                }
+                self.status = format!("{} skill(s) loaded", self.skills.len());
+            }
             _ => {
-                self.status = format!("Unknown command: /{}", name);
+                // `/skill:<name>` is registered as a dynamic palette
+                // entry; when the user picks it with Enter we reach
+                // `execute_command("skill:<name>")`. Route to
+                // `send_message` so expansion + persistence +
+                // streaming happen exactly like the user had typed
+                // the slash command manually.
+                if let Some(rest) = name.strip_prefix("skill:") {
+                    let invocation = format!("/skill:{rest}");
+                    self.send_message(&invocation);
+                } else {
+                    self.status = format!("Unknown command: /{}", name);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Install the skill set resolved by the CLI / settings. Must
+    /// be called before `run()` for `/skill:<name>` expansion and
+    /// the `/skills` overview to have any content.
+    pub fn set_skills(&mut self, skills: Vec<pi_core::skills::Skill>) {
+        self.skills = skills;
+        // Rebuild the palette command list so `/skill:<name>`
+        // entries surface in autocomplete / palette filtering.
+        // Built-ins come first; skill commands append so they're
+        // easy to spot.
+        let mut commands = get_all_slash_commands();
+        for s in &self.skills {
+            commands.push(SlashCommand {
+                name: format!("skill:{}", s.name),
+                description: truncate_one_liner(&s.description, 80),
+            });
+        }
+        self.all_commands = commands;
     }
 
     /// Finalize the login key entry screen: write the provider + key
@@ -2173,6 +2256,38 @@ impl InteractiveMode {
     /// indices line up for `poll_active_job`.
     fn send_message(&mut self, text: &str) {
         self.messages_scroll = 0;
+
+        // Expand `/skill:<name> <args>` into a `<skill>`-wrapped
+        // block before anything else touches it so the rest of the
+        // send path (session persistence, streaming) sees the
+        // fully-expanded user message. Matches TS
+        // `_expandSkillCommand`.
+        let expanded_text = if text.starts_with("/skill:") {
+            match pi_core::skills::expand_skill_command(text, &self.skills) {
+                Some(expanded) => expanded,
+                None => {
+                    // Known prefix but unknown skill: surface a
+                    // visible error row instead of sending the
+                    // literal `/skill:xxx` to the model.
+                    let name = text
+                        .strip_prefix("/skill:")
+                        .and_then(|r| r.split_whitespace().next())
+                        .unwrap_or("")
+                        .to_string();
+                    self.messages.push(ConversationMessage {
+                        role: "error".to_string(),
+                        content: format!(
+                            "Unknown skill `/skill:{name}`. Use `/skill:` + Tab for loaded skills."
+                        ),
+                        ..Default::default()
+                    });
+                    return;
+                }
+            }
+        } else {
+            text.to_string()
+        };
+        let text = expanded_text.as_str();
         self.messages.push(ConversationMessage {
             role: "user".to_string(),
             content: text.to_string(),

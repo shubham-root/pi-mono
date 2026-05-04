@@ -13,6 +13,9 @@ mod plugin;
 
 use args::{Cli, Commands, ServerSubcommand, PluginSubcommand};
 use pi_core::model_registry::ModelRegistry;
+use pi_core::resource_loader::{ResourceLoader, ResourceLoaderOptions};
+use pi_core::skills::Skill;
+use pi_core::system_prompt::SystemPromptBuilder;
 use pi_core::Agent;
 use pi_modes::InteractiveMode;
 use pi_tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
@@ -196,6 +199,77 @@ fn resolve_model_and_key(
     (fallback, None)
 }
 
+/// Build the system prompt + load skills for the current run.
+/// Respects `--system-prompt`, `--skill`, and `--no-skills` flags.
+/// Returns `(system_prompt, skills)` so the caller can feed the
+/// prompt into the agent and the skill list into the interactive
+/// mode (for `/skill:<name>` expansion).
+fn build_system_prompt_and_skills(cli: &Cli) -> (String, Vec<Skill>) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Merge project + global settings so `skills`, `no_skills`,
+    // and `enable_skill_commands` from `.pi/config.toml` are
+    // honoured alongside the CLI flags.
+    let settings = pi_core::settings::Settings::load_merged(&cwd).unwrap_or_default();
+
+    let cli_skill_paths: Vec<std::path::PathBuf> = cli
+        .skill
+        .iter()
+        .map(|s| pi_core::resource_loader::expand_user(s))
+        .collect();
+
+    let no_skills = cli.no_skills || settings.no_skills.unwrap_or(false);
+    let loader = ResourceLoader::from_settings_and_cli(
+        cwd.clone(),
+        None,
+        &settings,
+        cli_skill_paths,
+        no_skills,
+    );
+    let skill_set = loader.skills();
+    for d in &skill_set.diagnostics {
+        eprintln!(
+            "warning: skill {}: {} ({})",
+            match d.kind {
+                pi_core::skills::DiagnosticKind::Warning => "warn",
+                pi_core::skills::DiagnosticKind::Collision => "collision",
+            },
+            d.message,
+            d.path.display(),
+        );
+    }
+
+    let os_info = format!(
+        "{} ({}/{})",
+        std::env::consts::OS,
+        std::env::consts::FAMILY,
+        std::env::consts::ARCH,
+    );
+
+    // Compose the final system prompt. Order matches the TS
+    // coding-agent: base + environment + tools + skills + AGENTS.md
+    // + custom.
+    let builder = SystemPromptBuilder::new()
+        .with_cwd(&cwd)
+        .with_os_info(os_info)
+        .with_skills(skill_set.skills.iter().cloned())
+        .with_agents_md_from(&cwd);
+
+    // --system-prompt on the CLI overrides the built-in prompt
+    // entirely — matches TS behaviour.
+    let prompt = if let Some(override_prompt) = cli
+        .system_prompt
+        .clone()
+        .or_else(|| settings.system_prompt.clone())
+    {
+        override_prompt
+    } else {
+        builder.build()
+    };
+
+    (prompt, skill_set.skills.clone())
+}
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -204,14 +278,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
+    match cli.command.clone() {
         Some(Commands::Print { prompt, model }) => {
             let (model_id, api_key) = resolve_model_and_key(model, true);
             let api_key = api_key.expect("resolve_model_and_key(strict=true) should exit if None");
 
+            let (system_prompt, _skills) = build_system_prompt_and_skills(&cli);
+
             // Create agent with built-in tools
             let mut agent = Agent::new(&model_id)
                 .with_api_key(&api_key)
+                .with_system_prompt(&system_prompt)
                 .with_tool(Box::new(BashTool))
                 .with_tool(Box::new(ReadTool))
                 .with_tool(Box::new(WriteTool))
@@ -297,9 +374,11 @@ async fn main() -> anyhow::Result<()> {
             // Interactive mode: default
             info!("Starting interactive mode");
 
-            let (model_id, api_key) = resolve_model_and_key(cli.model, false);
+            let (model_id, api_key) = resolve_model_and_key(cli.model.clone(), false);
 
-            let mut agent = Agent::new(&model_id);
+            let (system_prompt, skills) = build_system_prompt_and_skills(&cli);
+
+            let mut agent = Agent::new(&model_id).with_system_prompt(&system_prompt);
             if let Some(key) = api_key {
                 agent = agent.with_api_key(&key);
             }
@@ -415,6 +494,7 @@ async fn main() -> anyhow::Result<()> {
             // Launch interactive mode
             match InteractiveMode::new_with_session(agent, resume_session) {
                 Ok(mut mode) => {
+                    mode.set_skills(skills);
                     if let Err(e) = mode.run().await {
                         eprintln!("Interactive mode error: {}", e);
                         std::process::exit(1);

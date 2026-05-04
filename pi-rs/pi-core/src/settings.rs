@@ -22,6 +22,22 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
 
+    /// Paths to scan for additional skills (files or directories).
+    /// Mirrors the TS `skills` settings array. Tilde (`~`) is
+    /// expanded against the user's home directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+
+    /// Register `/skill:<name>` slash commands for every loaded
+    /// skill. Default: true. Matches TS `enableSkillCommands`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_skill_commands: Option<bool>,
+
+    /// If true, skip the default global / project skill discovery.
+    /// Explicit `skills` paths still load. Mirrors `--no-skills`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_skills: Option<bool>,
+
     /// Enable/disable tools
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
@@ -50,6 +66,9 @@ impl Settings {
             model: None,
             thinking: None,
             system_prompt: None,
+            skills: None,
+            enable_skill_commands: None,
+            no_skills: None,
             tools: None,
             plugins: None,
             temperature: None,
@@ -95,6 +114,16 @@ impl Settings {
             model: other.model.clone().or_else(|| self.model.clone()),
             thinking: other.thinking.clone().or_else(|| self.thinking.clone()),
             system_prompt: other.system_prompt.clone().or_else(|| self.system_prompt.clone()),
+            skills: match (&self.skills, &other.skills) {
+                (Some(a), Some(b)) => {
+                    let mut combined = a.clone();
+                    combined.extend(b.iter().cloned());
+                    Some(combined)
+                }
+                (a, b) => b.clone().or_else(|| a.clone()),
+            },
+            enable_skill_commands: other.enable_skill_commands.or(self.enable_skill_commands),
+            no_skills: other.no_skills.or(self.no_skills),
             tools: other.tools.or(self.tools),
             plugins: other.plugins.clone().or_else(|| self.plugins.clone()),
             temperature: other.temperature.or(self.temperature),
@@ -144,6 +173,9 @@ impl Settings {
             model: self.model.clone().or_else(|| Some("claude-3-sonnet".to_string())),
             thinking: self.thinking.clone().or_else(|| Some("low".to_string())),
             system_prompt: self.system_prompt.clone(),
+            skills: self.skills.clone(),
+            enable_skill_commands: self.enable_skill_commands.or(Some(true)),
+            no_skills: self.no_skills.or(Some(false)),
             tools: self.tools.or(Some(true)),
             plugins: self.plugins.clone(),
             temperature: self.temperature.or(Some(0.7)),
