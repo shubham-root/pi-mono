@@ -2587,7 +2587,7 @@ impl InteractiveMode {
                 // every past and future turn uniformly — the whole
                 // reason we moved back to an alt-screen viewport in
                 // the first place.
-                let lines = render_messages(&messages, show_thinking, show_tools);
+                let lines = render_messages(&messages, show_thinking, show_tools, msg_area.width as usize);
                 let avail = msg_area.height as usize;
                 let total = lines.len();
                 // `messages_scroll` counts "rows scrolled up from the
@@ -3004,20 +3004,41 @@ fn render_startup_banner() -> Vec<Line<'static>> {
     ]
 }
 
-/// Render conversation messages the same way the TS version does: user
-/// messages in accent cyan prefixed with `You`, assistant text plain, and
-/// spacer rows between turns.
-/// Render conversation messages the same way the TS version does: user
-/// messages in accent cyan prefixed with `You`, assistant text plain, and
-/// spacer rows between turns. When `show_thinking` is true, thinking
-/// blocks are rendered inline in dim italic. Tool calls always render
-/// inline (matching TS behavior: tool-execution components always show).
+/// Pad `line` with trailing space-characters styled as `bg_style`
+/// so it fills the full `width` columns when rendered. Ratatui's
+/// `Paragraph::render_text` only styles cells covered by graphemes;
+/// cells past the last span keep whatever was in the buffer before.
+/// Padding with a bg-styled run is the portable way to get
+/// "sectional" full-width tints without juggling Paragraph styles
+/// per-message.
+fn pad_line_to_width(line: Line<'static>, width: usize, bg_style: Style) -> Line<'static> {
+    let current: usize = line.spans.iter().map(|s| s.width()).sum();
+    if current >= width {
+        return line;
+    }
+    let mut spans = line.spans;
+    spans.push(Span::styled(" ".repeat(width - current), bg_style));
+    Line::from(spans)
+}
+
+/// Render conversation messages the same way the TS version does:
+/// user messages on a tinted `#343541` row, assistant text plain,
+/// tool calls on status-tinted rows, thinking dim italic.
+/// `viewport_width` is the terminal column count; tinted rows are
+/// padded with trailing background-coloured spaces to that width so
+/// each message reads as a full-width block rather than a text-only
+/// highlight. Matches the TS variant's sectional look.
 fn render_messages(
     messages: &[ConversationMessage],
     show_thinking: bool,
     show_tools: bool,
+    viewport_width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let width = viewport_width.max(1);
+    let pad = |line: Line<'static>, bg: Style| -> Line<'static> {
+        pad_line_to_width(line, width, bg)
+    };
     for msg in messages {
         if msg.role == "error" {
             // Error rows get a dedicated red-tinted style so provider
@@ -3029,16 +3050,16 @@ fn render_messages(
                 .add_modifier(Modifier::BOLD);
             for (i, text_line) in msg.content.lines().enumerate() {
                 if i == 0 {
-                    lines.push(Line::from(vec![
+                    lines.push(pad(Line::from(vec![
                         Span::styled(" error ".to_string(), prefix_style),
                         Span::styled(" ".to_string(), bg),
                         Span::styled(text_line.to_string(), bg.fg(Color::Red)),
-                    ]));
+                    ]), bg));
                 } else {
-                    lines.push(Line::from(vec![
+                    lines.push(pad(Line::from(vec![
                         Span::styled("       ".to_string(), bg),
                         Span::styled(text_line.to_string(), bg.fg(Color::Red)),
-                    ]));
+                    ]), bg));
                 }
             }
             lines.push(Line::from(""));
@@ -3055,16 +3076,16 @@ fn render_messages(
             let prefix_style = bg.fg(Color::Cyan).add_modifier(Modifier::BOLD);
             for (i, text_line) in msg.content.lines().enumerate() {
                 if i == 0 {
-                    lines.push(Line::from(vec![
+                    lines.push(pad(Line::from(vec![
                         Span::styled(" You ".to_string(), prefix_style),
                         Span::styled("› ".to_string(), bg.fg(Color::Gray)),
                         Span::styled(text_line.to_string(), bg),
-                    ]));
+                    ]), bg));
                 } else {
-                    lines.push(Line::from(vec![
+                    lines.push(pad(Line::from(vec![
                         Span::styled("     ".to_string(), bg),
                         Span::styled(text_line.to_string(), bg),
-                    ]));
+                    ]), bg));
                 }
             }
             lines.push(Line::from(""));
@@ -3073,22 +3094,32 @@ fn render_messages(
 
         // Assistant message: thinking (optional) → tool calls → text.
         if show_thinking && !msg.thinking.trim().is_empty() {
-            lines.push(Line::from(Span::styled(
-                "● thinking".to_string(),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            // Thinking also gets a tinted block so it's clearly
+            // separated from both the user input above and the
+            // assistant text below. Dim-ish blue-grey, no matching
+            // TS key — we invent one here that sits between user
+            // and tool backgrounds on the darkness scale.
+            let think_bg = Style::default().bg(Color::Rgb(0x26, 0x28, 0x34));
+            lines.push(pad(
+                Line::from(vec![Span::styled(
+                    " ● thinking ".to_string(),
+                    think_bg.fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )]),
+                think_bg,
+            ));
             for t_line in msg.thinking.lines() {
-                lines.push(Line::from(vec![
-                    Span::styled("  ".to_string(), dim_style()),
-                    Span::styled(
-                        t_line.to_string(),
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ]));
+                lines.push(pad(
+                    Line::from(vec![
+                        Span::styled("  ".to_string(), think_bg),
+                        Span::styled(
+                            t_line.to_string(),
+                            think_bg
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]),
+                    think_bg,
+                ));
             }
             lines.push(Line::from(""));
         }
@@ -3118,15 +3149,18 @@ fn render_messages(
                 ),
             };
             let bg = Style::default().bg(bg_color);
-            let header = Line::from(vec![
-                Span::styled(format!(" {icon} "), icon_style.bg(bg_color)),
-                Span::styled(
-                    call.name.clone(),
-                    bg.fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" ".to_string(), bg),
-                Span::styled(call.input_preview.clone(), bg.fg(Color::Gray)),
-            ]);
+            let header = pad(
+                Line::from(vec![
+                    Span::styled(format!(" {icon} "), icon_style.bg(bg_color)),
+                    Span::styled(
+                        call.name.clone(),
+                        bg.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" ".to_string(), bg),
+                    Span::styled(call.input_preview.clone(), bg.fg(Color::Gray)),
+                ]),
+                bg,
+            );
             lines.push(header);
             // Tool-specific structured preview (edit -> mini-diff, write
             // -> content preview). Shown regardless of Ctrl+I because
@@ -3134,7 +3168,7 @@ fn render_messages(
             // destructive.
             if let Some(raw) = call.input_raw.as_ref() {
                 for extra in tool_structured_preview(&call.name, raw, bg) {
-                    lines.push(extra);
+                    lines.push(pad(extra, bg));
                 }
             }
             if show_tools {
@@ -3143,10 +3177,13 @@ fn render_messages(
                 // across the terminal.
                 if let Some(output) = &call.output {
                     for out_line in output.lines() {
-                        lines.push(Line::from(vec![
-                            Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
-                            Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
-                        ]));
+                        lines.push(pad(
+                            Line::from(vec![
+                                Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
+                                Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
+                            ]),
+                            bg,
+                        ));
                     }
                 }
             } else if let Some(output) = &call.output {
@@ -3157,21 +3194,27 @@ fn render_messages(
                 const COLLAPSED_LINES: usize = 5;
                 let mut shown = 0;
                 for out_line in output.lines().take(COLLAPSED_LINES) {
-                    lines.push(Line::from(vec![
-                        Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
-                        Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
-                    ]));
+                    lines.push(pad(
+                        Line::from(vec![
+                            Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
+                            Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
+                        ]),
+                        bg,
+                    ));
                     shown += 1;
                 }
                 let total = output.lines().count();
                 if total > shown {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "  │ … {} more line(s) · ctrl+i for full output",
-                            total - shown
-                        ),
-                        bg.fg(Color::DarkGray),
-                    )));
+                    lines.push(pad(
+                        Line::from(vec![Span::styled(
+                            format!(
+                                "  │ … {} more line(s) · ctrl+i for full output",
+                                total - shown
+                            ),
+                            bg.fg(Color::DarkGray),
+                        )]),
+                        bg,
+                    ));
                 }
             }
         }
