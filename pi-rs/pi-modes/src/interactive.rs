@@ -596,13 +596,21 @@ impl InteractiveMode {
                         true
                     }
                     AppEvent::Mouse(m) => {
-                        // Mouse capture is intentionally disabled so the
-                        // terminal can handle wheel events natively for
-                        // scrollback. In practice we shouldn't receive
-                        // mouse events at all. If we do (some terminals
-                        // send them anyway), ignore them so nothing is
-                        // hijacked from the terminal's own scroll UI.
-                        let _ = m;
+                        // Wheel scrolling lets the user walk the
+                        // transcript without taking their hands off
+                        // the pointer. Only active when the Chat
+                        // viewport is the focused surface; overlays
+                        // consume Up/Down themselves.
+                        use crossterm::event::MouseEventKind;
+                        match m.kind {
+                            MouseEventKind::ScrollUp => {
+                                self.handle_scroll_up(3);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                self.handle_scroll_down(3);
+                            }
+                            _ => {}
+                        }
                         true
                     }
                     _ => true,
@@ -1765,57 +1773,17 @@ impl InteractiveMode {
     /// `render_messages` helper the inline viewport uses, so the
     /// visual formatting matches exactly. After a successful
     /// promotion the inline viewport is clean on the next frame
-    /// because the draw loop only touches `messages[promoted_count..]`.
-    fn promote_pending_messages_to_scrollback(&mut self) {
-        if self.promoted_count >= self.messages.len() {
-            return;
-        }
-        let pending: Vec<ConversationMessage> = self
-            .messages
-            .iter()
-            .skip(self.promoted_count)
-            .cloned()
-            .collect();
-        let show_thinking = self.show_thinking;
-        let show_tools = self.show_tools;
-        let lines = render_messages(&pending, show_thinking, show_tools);
-        if lines.is_empty() {
-            self.promoted_count = self.messages.len();
-            return;
-        }
-        // Ratatui's `insert_before` allocates a buffer of exactly
-        // the requested height, so long lines that wrap must be
-        // counted BEFORE the call — otherwise `Paragraph::render`
-        // panics writing past the end. We over-count slightly to
-        // be safe on wide unicode.
-        let width = self.event_loop.terminal().size().0;
-        let height = estimate_wrapped_rows(&lines, width);
-        let term = self.event_loop.terminal();
-        let _ = term.insert_before(height, move |buf| {
-            let area = buf.area;
-            let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-            p.render(area, buf);
-        });
-        self.promoted_count = self.messages.len();
-    }
+    /// No-op in alt-screen mode. Kept so existing call sites
+    /// (turn-completion hooks, `/new`, `/resume`) compile. The draw
+    /// loop now renders every message in the viewport directly; the
+    /// terminal's scrollback is the user's shell history, not pi's
+    /// transcript. See [`Self::draw`] for the actual render path.
+    fn promote_pending_messages_to_scrollback(&mut self) {}
 
-    fn promote_startup_banner_once(&mut self) {
-        if self.banner_promoted {
-            return;
-        }
-        let lines = render_startup_banner();
-        if !lines.is_empty() {
-            let width = self.event_loop.terminal().size().0;
-            let height = estimate_wrapped_rows(&lines, width);
-            let term = self.event_loop.terminal();
-            let _ = term.insert_before(height, move |buf| {
-                let area = buf.area;
-                let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-                p.render(area, buf);
-            });
-        }
-        self.banner_promoted = true;
-    }
+    /// No-op: the startup banner is rendered inline by
+    /// [`Self::draw`] when `messages` is empty. See
+    /// `render_startup_banner`.
+    fn promote_startup_banner_once(&mut self) {}
 
     fn close_palette(&mut self) {
         self.palette_active = false;
@@ -2610,35 +2578,31 @@ impl InteractiveMode {
 
             // ===== Messages / startup banner =====
             if first_turn {
-                // The banner was already promoted to scrollback in
-                // `run()` via `promote_startup_banner_once`, so the
-                // inline viewport just leaves the message area empty
-                // until the user sends something. This prevents the
-                // banner from rendering twice (once above, once in
-                // the viewport).
+                let lines = render_startup_banner();
+                let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+                frame.render_widget(para, msg_area);
             } else {
-                // Only render messages that haven't been promoted to
-                // the terminal's native scrollback yet. When idle
-                // this is usually empty — completed turns live in
-                // the scrollback above the inline viewport. While a
-                // turn is streaming, the live assistant bubble
-                // renders here and gets promoted on completion.
-                let live_messages: Vec<ConversationMessage> = messages
-                    .iter()
-                    .skip(promoted_count)
-                    .cloned()
-                    .collect();
-                let lines = render_messages(&live_messages, show_thinking, show_tools);
-                // If the live content is taller than the available
-                // msg_area, show the tail (newest tokens at the
-                // bottom). Older content will land in scrollback on
-                // completion via `insert_before`, so tail clipping
-                // here is temporary.
+                // Render the full transcript every frame. The toggle
+                // state (`show_thinking`, `show_tools`) applies to
+                // every past and future turn uniformly — the whole
+                // reason we moved back to an alt-screen viewport in
+                // the first place.
+                let lines = render_messages(&messages, show_thinking, show_tools);
                 let avail = msg_area.height as usize;
                 let total = lines.len();
+                // `messages_scroll` counts "rows scrolled up from the
+                // bottom". 0 pins the newest line to the last row of
+                // the messages area (autoscroll). Larger values slide
+                // the view upward so older content comes into view.
+                let tail_offset = messages_scroll.min(total.saturating_sub(avail));
                 let slice: Vec<Line> = if total > avail {
-                    lines[total - avail..].to_vec()
+                    let end = total - tail_offset;
+                    let start = end.saturating_sub(avail);
+                    lines[start..end].to_vec()
                 } else {
+                    // Transcript shorter than the viewport: pad from
+                    // the top so the newest row stays anchored to
+                    // the bottom of the messages area — matches TS.
                     let pad = avail - total;
                     let mut out: Vec<Line> = (0..pad).map(|_| Line::from("")).collect();
                     out.extend(lines);

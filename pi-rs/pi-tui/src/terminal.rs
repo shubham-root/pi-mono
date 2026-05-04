@@ -1,24 +1,37 @@
-//! Terminal backend - raw mode, event handling, inline viewport.
+//! Terminal backend - raw mode, event handling, fullscreen viewport.
 //!
-//! Uses ratatui's `Viewport::Inline` so pi owns a fixed-height region
-//! at the bottom of the terminal while the scrollback above holds
-//! the normal shell history PLUS any messages pi promotes to it.
-//! This gives us native terminal scrolling for conversation history
-//! (mouse wheel / trackpad / terminal's own scroll UI) for free.
+//! Uses ratatui's default (fullscreen) viewport in the alternate
+//! screen so pi owns the whole terminal while it's running and
+//! restores the user's shell on exit. This lets the renderer
+//! re-paint every past message on every frame, which is what
+//! makes toggles like Ctrl+I (tool output collapsed / expanded)
+//! work retroactively across the entire conversation instead of
+//! only affecting future turns.
+//!
+//! The previous inline-viewport approach (Phase 3.24) traded
+//! retroactive re-rendering for native terminal scrollback. That
+//! trade-off turned out to be wrong for the toggle UX — once a
+//! turn is promoted into the terminal's scrollback, ratatui can't
+//! touch it, so the Ctrl+I state was frozen per turn at the time
+//! of promotion. Going back to alt-screen restores TS-pi parity:
+//! everything lives in the viewport; scroll with PgUp / PgDn /
+//! mouse wheel; toggles re-render the whole transcript.
 
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEvent,
-        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyEvent, KeyboardEnhancementFlags, MouseEvent,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::prelude::*;
-use ratatui::{TerminalOptions, Viewport};
 use std::io::Stdout;
 use std::sync::mpsc;
 use std::thread;
@@ -34,19 +47,6 @@ pub enum TerminalEvent {
     Tick,
 }
 
-/// Default height for the inline viewport. Chosen to fit:
-///   1 row  - last-call stats
-///   1 row  - upper boundary rule
-///   1..=7 rows - editor
-///   1 row  - lower boundary rule
-///   1 row  - hint line
-///   1 row  - pwd (branch)
-///   1 row  - context / model
-/// Plus a couple of extra rows of slack for overlays / active streaming
-/// content. Overlays and tall editor content momentarily exceed this
-/// and cause ratatui to resize the viewport.
-const INLINE_VIEWPORT_ROWS: u16 = 14;
-
 pub struct Terminal {
     terminal: ratatui::Terminal<CrosstermBackend<Stdout>>,
     event_rx: mpsc::Receiver<TerminalEvent>,
@@ -56,7 +56,7 @@ pub struct Terminal {
 impl Terminal {
     pub fn new() -> Result<Self> {
         // Restore terminal on panic so a crash doesn't leave the
-        // user's shell in raw mode.
+        // user's shell in raw mode + alt-screen.
         let panic_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
             let _ = Self::restore_terminal();
@@ -65,16 +65,14 @@ impl Terminal {
 
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
-        // Bracketed paste lets us receive multi-line paste as a single
-        // event instead of a sequence of Enter keypresses. Mouse capture
-        // is intentionally NOT enabled because inline mode wants the
-        // terminal's native scrollback to keep working when the user
-        // scrolls up with their trackpad / wheel; capturing the events
-        // would steal them from the terminal.
+        execute!(stdout, EnterAlternateScreen)?;
         execute!(stdout, EnableBracketedPaste)?;
-        // Kitty keyboard protocol lets us distinguish Shift+Enter and
-        // catch key releases; query before pushing so we don't error
-        // on terminals that don't implement it.
+        // Mouse capture lets us receive wheel events (for scrolling
+        // the conversation) and drag events (for the scrollbar).
+        execute!(stdout, EnableMouseCapture)?;
+        // Kitty keyboard protocol lets us distinguish Shift+Enter,
+        // Ctrl+I from Tab, and catch key releases; query first so we
+        // don't error on terminals that don't implement it.
         if matches!(supports_keyboard_enhancement(), Ok(true)) {
             let _ = execute!(
                 stdout,
@@ -86,16 +84,7 @@ impl Terminal {
         }
 
         let backend = CrosstermBackend::new(stdout);
-        // Inline viewport: pi owns a fixed-height region at the bottom
-        // of the terminal. Content above it (including anything we
-        // promote via `insert_before`) lives in the terminal's native
-        // scrollback so the user's existing scroll workflow just works.
-        let terminal = ratatui::Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(INLINE_VIEWPORT_ROWS),
-            },
-        )?;
+        let terminal = ratatui::Terminal::new(backend)?;
 
         let (tx, rx) = mpsc::channel();
         let tx_clone = tx.clone();
@@ -150,19 +139,6 @@ impl Terminal {
         Ok(())
     }
 
-    /// Promote a block of content *above* the inline viewport into the
-    /// terminal's native scrollback. The caller renders the full
-    /// block (via ratatui widgets) inside the closure. Used for
-    /// completed conversation turns so the user's terminal scrollback
-    /// naturally accumulates chat history.
-    pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> Result<()>
-    where
-        F: FnOnce(&mut Buffer),
-    {
-        self.terminal.insert_before(height, draw_fn)?;
-        Ok(())
-    }
-
     pub fn clear(&mut self) -> Result<()> {
         self.terminal.clear()?;
         Ok(())
@@ -172,14 +148,10 @@ impl Terminal {
         disable_raw_mode()?;
         let mut stdout = std::io::stdout();
         let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-        // Inline viewport doesn't use the alternate screen, so we only
-        // need to tear down the protocol opt-ins.
-        execute!(stdout, DisableBracketedPaste)?;
-        // Leave the inline viewport on screen as final output — users
-        // see their last interaction preserved in the terminal
-        // instead of an empty cleared frame.
+        let _ = execute!(stdout, DisableBracketedPaste);
+        let _ = execute!(stdout, DisableMouseCapture);
+        let _ = execute!(stdout, LeaveAlternateScreen);
         let _ = execute!(stdout, crossterm::cursor::Show);
-        let _ = writeln!(stdout);
         Ok(())
     }
 }
@@ -189,8 +161,6 @@ impl Drop for Terminal {
         let _ = Self::restore_terminal();
     }
 }
-
-use std::io::Write as _;
 
 #[cfg(test)]
 mod tests {
