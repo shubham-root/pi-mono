@@ -369,6 +369,13 @@ pub struct InteractiveMode {
     /// autocomplete menu.
     skills: Vec<pi_core::skills::Skill>,
 
+    /// Copy of the CLI `--skill` paths so `/reload` can re-apply them.
+    cli_skill_paths: Vec<std::path::PathBuf>,
+    /// Copy of the CLI `--no-skills` flag.
+    cli_no_skills: bool,
+    /// Copy of the CLI `--system-prompt` override, if any.
+    cli_system_prompt_override: Option<String>,
+
     /// Number of `messages` entries already promoted to the
     /// terminal's native scrollback via `terminal.insert_before`.
     /// Rendering only touches `messages[promoted_count..]` so
@@ -545,6 +552,9 @@ impl InteractiveMode {
             autocomplete_selected: 0,
             messages_scroll: 0,
             skills: Vec::new(),
+            cli_skill_paths: Vec::new(),
+            cli_no_skills: false,
+            cli_system_prompt_override: None,
             active_model_id_cache: initial_model,
             promoted_count: 0,
             banner_promoted: false,
@@ -2088,11 +2098,53 @@ impl InteractiveMode {
                 );
             }
             "reload" => {
-                // Registry is a one-shot statically loaded global; we can
-                // at least re-read the auth file and refresh the saved-key
-                // column for the login UI.
+                // Full resource reload: rescan skill locations,
+                // re-read AGENTS.md, re-merge settings, and
+                // rebuild the active system prompt so the very
+                // next turn sees fresh state. Mirrors TS
+                // `/reload`.
+                let cwd = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let tool_lines = self
+                    .agent
+                    .as_ref()
+                    .map(|a| {
+                        a.tools()
+                            .iter()
+                            .map(|t| {
+                                let desc = t.description();
+                                let one = desc.lines().next().unwrap_or("").trim();
+                                format!("- {}: {}", t.name(), one)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let composed = pi_core::system_prompt::compose_prompt_and_skills(
+                    pi_core::system_prompt::ComposePromptOptions {
+                        cwd,
+                        cli_skill_paths: self.cli_skill_paths.clone(),
+                        no_skills: self.cli_no_skills,
+                        system_prompt_override: self.cli_system_prompt_override.clone(),
+                        os_info: pi_core::system_prompt::describe_host_os(),
+                        custom_instructions: None,
+                        include_date: true,
+                        tool_lines,
+                    },
+                );
+                let skill_count = composed.skills.len();
+                let diag_count = composed.diagnostics.len();
+                if let Some(agent) = self.agent.as_mut() {
+                    agent.set_system_prompt(&composed.prompt);
+                }
+                // `set_skills` also rebuilds palette entries and the
+                // slash-command autocomplete menu.
+                self.set_skills(composed.skills);
+                // Auth cache refresh matches previous behaviour so
+                // the login screen's saved-key column stays current.
                 let _ = crate::auth::load_auth();
-                self.status = "Reloaded auth cache. (Provider TOMLs are loaded at process start.)".to_string();
+                self.status = format!(
+                    "Reloaded: {skill_count} skill(s), {diag_count} diagnostic(s). Next turn uses the refreshed system prompt."
+                );
             }
             "share" => {
                 match share_via_gh_gist(&self.messages) {
@@ -2213,6 +2265,20 @@ impl InteractiveMode {
             });
         }
         self.all_commands = commands;
+    }
+
+    /// Remember the CLI flags that drive skill discovery so
+    /// `/reload` can re-apply them without needing the top-level
+    /// `Cli` value after startup.
+    pub fn set_cli_skill_context(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        no_skills: bool,
+        system_prompt_override: Option<String>,
+    ) {
+        self.cli_skill_paths = paths;
+        self.cli_no_skills = no_skills;
+        self.cli_system_prompt_override = system_prompt_override;
     }
 
     /// Finalize the login key entry screen: write the provider + key

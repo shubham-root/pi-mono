@@ -137,6 +137,18 @@ impl Agent {
         self
     }
 
+    /// Replace the active system prompt at runtime. Used by
+    /// `/reload` so a freshly-composed prompt (new skills, new
+    /// AGENTS.md, updated cwd) takes effect on the next turn without
+    /// reconstructing the `Agent`. Pass an empty string to clear.
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        self.system_prompt = if prompt.is_empty() {
+            None
+        } else {
+            Some(prompt.to_string())
+        };
+    }
+
     pub fn with_tool(mut self, tool: Box<dyn pi_tools::Tool>) -> Self {
         self.tools.push(tool);
         self
@@ -597,6 +609,13 @@ impl Agent {
     }
 
     /// Get tool count for testing.
+    /// Read-only slice of the tools this agent has registered.
+    /// Used by `/reload` to rebuild the system prompt's
+    /// "Available tools" section without duplicating the tool list.
+    pub fn tools(&self) -> &[Box<dyn pi_tools::Tool>] {
+        &self.tools
+    }
+
     pub fn tools_count(&self) -> usize {
         self.tools.len()
     }

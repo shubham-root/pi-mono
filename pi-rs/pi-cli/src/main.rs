@@ -13,9 +13,8 @@ mod plugin;
 
 use args::{Cli, Commands, ServerSubcommand, PluginSubcommand};
 use pi_core::model_registry::ModelRegistry;
-use pi_core::resource_loader::{ResourceLoader, ResourceLoaderOptions};
 use pi_core::skills::Skill;
-use pi_core::system_prompt::SystemPromptBuilder;
+use pi_core::system_prompt::{compose_prompt_and_skills, describe_host_os, ComposePromptOptions};
 use pi_core::Agent;
 use pi_modes::InteractiveMode;
 use pi_tools::{BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool};
@@ -207,27 +206,34 @@ fn resolve_model_and_key(
 fn build_system_prompt_and_skills(cli: &Cli) -> (String, Vec<Skill>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
-    // Merge project + global settings so `skills`, `no_skills`,
-    // and `enable_skill_commands` from `.pi/config.toml` are
-    // honoured alongside the CLI flags.
-    let settings = pi_core::settings::Settings::load_merged(&cwd).unwrap_or_default();
-
     let cli_skill_paths: Vec<std::path::PathBuf> = cli
         .skill
         .iter()
         .map(|s| pi_core::resource_loader::expand_user(s))
         .collect();
 
-    let no_skills = cli.no_skills || settings.no_skills.unwrap_or(false);
-    let loader = ResourceLoader::from_settings_and_cli(
-        cwd.clone(),
-        None,
-        &settings,
+    // Tool lines are built per-agent, not here, because the CLI
+    // hands a strongly-typed tool list to `Agent::with_tool`. We
+    // mirror the default list here so the system prompt has
+    // accurate "Available tools" rows.
+    let tool_lines = if cli.no_tools {
+        Vec::new()
+    } else {
+        default_tool_lines()
+    };
+
+    let composed = compose_prompt_and_skills(ComposePromptOptions {
+        cwd,
         cli_skill_paths,
-        no_skills,
-    );
-    let skill_set = loader.skills();
-    for d in &skill_set.diagnostics {
+        no_skills: cli.no_skills,
+        system_prompt_override: cli.system_prompt.clone(),
+        os_info: describe_host_os(),
+        custom_instructions: None,
+        include_date: true,
+        tool_lines,
+    });
+
+    for d in &composed.diagnostics {
         eprintln!(
             "warning: skill {}: {} ({})",
             match d.kind {
@@ -239,35 +245,30 @@ fn build_system_prompt_and_skills(cli: &Cli) -> (String, Vec<Skill>) {
         );
     }
 
-    let os_info = format!(
-        "{} ({}/{})",
-        std::env::consts::OS,
-        std::env::consts::FAMILY,
-        std::env::consts::ARCH,
-    );
+    (composed.prompt, composed.skills)
+}
 
-    // Compose the final system prompt. Order matches the TS
-    // coding-agent: base + environment + tools + skills + AGENTS.md
-    // + custom.
-    let builder = SystemPromptBuilder::new()
-        .with_cwd(&cwd)
-        .with_os_info(os_info)
-        .with_skills(skill_set.skills.iter().cloned())
-        .with_agents_md_from(&cwd);
-
-    // --system-prompt on the CLI overrides the built-in prompt
-    // entirely — matches TS behaviour.
-    let prompt = if let Some(override_prompt) = cli
-        .system_prompt
-        .clone()
-        .or_else(|| settings.system_prompt.clone())
-    {
-        override_prompt
-    } else {
-        builder.build()
-    };
-
-    (prompt, skill_set.skills.clone())
+/// Mirror `main()`'s hard-coded tool set so the system prompt's
+/// "Available tools" section lists exactly what the agent gets.
+fn default_tool_lines() -> Vec<String> {
+    use pi_tools::Tool;
+    let tools: Vec<Box<dyn Tool>> = vec![
+        Box::new(BashTool),
+        Box::new(ReadTool),
+        Box::new(WriteTool),
+        Box::new(EditTool),
+        Box::new(GrepTool),
+        Box::new(FindTool),
+        Box::new(LsTool),
+    ];
+    tools
+        .iter()
+        .map(|t| {
+            let desc = t.description();
+            let one = desc.lines().next().unwrap_or("").trim();
+            format!("- {}: {}", t.name(), one)
+        })
+        .collect()
 }
 
 
@@ -495,6 +496,16 @@ async fn main() -> anyhow::Result<()> {
             match InteractiveMode::new_with_session(agent, resume_session) {
                 Ok(mut mode) => {
                     mode.set_skills(skills);
+                    let cli_skill_paths: Vec<std::path::PathBuf> = cli
+                        .skill
+                        .iter()
+                        .map(|s| pi_core::resource_loader::expand_user(s))
+                        .collect();
+                    mode.set_cli_skill_context(
+                        cli_skill_paths,
+                        cli.no_skills,
+                        cli.system_prompt.clone(),
+                    );
                     if let Err(e) = mode.run().await {
                         eprintln!("Interactive mode error: {}", e);
                         std::process::exit(1);

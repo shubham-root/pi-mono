@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use pi_tools::Tool;
 
-use crate::skills::{format_skills_for_prompt, Skill};
+use crate::resource_loader::{ResourceLoader, ResourceLoaderOptions};
+use crate::settings::Settings;
+use crate::skills::{format_skills_for_prompt, LoadSkillsResult, Skill};
 
 /// Assembles the system prompt from a collection of additive
 /// building blocks. Every `with_*` method returns `self` for
@@ -28,7 +30,7 @@ use crate::skills::{format_skills_for_prompt, Skill};
 pub struct SystemPromptBuilder {
     cwd: Option<PathBuf>,
     os_info: Option<String>,
-    tool_lines: Vec<String>,
+    pub(crate) tool_lines: Vec<String>,
     skills: Vec<Skill>,
     custom_instructions: Option<String>,
     include_date: bool,
@@ -204,6 +206,136 @@ fn find_agents_md(start: &Path) -> Option<String> {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// Inputs for a full system-prompt + skill rebuild. Used by
+/// `compose_prompt_and_skills`, which is shared by the CLI launcher
+/// and the interactive `/reload` handler so both paths apply the
+/// exact same rules.
+#[derive(Debug, Clone)]
+pub struct ComposePromptOptions {
+    /// Working directory — drives skill discovery and `AGENTS.md`
+    /// lookup.
+    pub cwd: std::path::PathBuf,
+    /// `--skill <path>` entries from the CLI (repeatable, relative
+    /// paths are resolved against `cwd`). Keep empty when calling
+    /// from `/reload` if you don't want to re-apply CLI-only flags.
+    pub cli_skill_paths: Vec<std::path::PathBuf>,
+    /// Honour `--no-skills`.
+    pub no_skills: bool,
+    /// Explicit system-prompt override (from `--system-prompt` or
+    /// `settings.system_prompt`). When present, the built-in
+    /// composer is bypassed entirely and this string becomes the
+    /// final prompt. Matches TS behaviour.
+    pub system_prompt_override: Option<String>,
+    /// Short description of the host OS (e.g. `darwin (unix/arm64)`).
+    pub os_info: String,
+    /// Custom instructions to append after all built-in blocks.
+    pub custom_instructions: Option<String>,
+    /// Whether to include a `Today is <YYYY-MM-DD>` environment
+    /// line. Off for snapshot tests; on by default.
+    pub include_date: bool,
+    /// Descriptors for the live tool set. Each entry is emitted as
+    /// `- name: first-line-of-description`.
+    pub tool_lines: Vec<String>,
+}
+
+impl ComposePromptOptions {
+    /// Capture `(name, description)` from every provided tool so the
+    /// full prompt knows which tools are active. Keeping tools out
+    /// of the struct directly lets callers that don't own a live
+    /// `Vec<Box<dyn Tool>>` compose a prompt without reconstructing
+    /// the agent's tool list.
+    pub fn with_tool_list<T: Tool + ?Sized>(mut self, tools: &[&T]) -> Self {
+        self.tool_lines = tools
+            .iter()
+            .map(|t| format!("- {}: {}", t.name(), first_line(&t.description())))
+            .collect();
+        self
+    }
+}
+
+/// The result of a full prompt compose: the final system prompt
+/// string plus the skill set that fed into it. Callers hand the
+/// prompt to the agent and the skills to the TUI.
+#[derive(Debug, Clone, Default)]
+pub struct ComposedPrompt {
+    /// Assembled system prompt.
+    pub prompt: String,
+    /// Skills discovered during this compose.
+    pub skills: Vec<Skill>,
+    /// Any warnings / collisions from the resource loader.
+    pub diagnostics: Vec<crate::skills::SkillDiagnostic>,
+}
+
+/// One-stop shop for (re)building the system prompt and the skill
+/// set. Mirrors what TS does in `agent-session-services.ts` +
+/// `system-prompt.ts` combined, but funnelled through a single
+/// call because the Rust port keeps them decoupled from the agent
+/// session.
+///
+/// The function:
+///   1. loads merged global + project settings;
+///   2. runs the resource loader across every configured skill
+///      source;
+///   3. builds the environment + tools + skills + AGENTS.md
+///      prompt OR applies an explicit override.
+pub fn compose_prompt_and_skills(opts: ComposePromptOptions) -> ComposedPrompt {
+    // Merge project + global settings so `skills`, `no_skills`,
+    // `enable_skill_commands`, and `system_prompt` from
+    // `.pi/config.toml` are honoured.
+    let settings = Settings::load_merged(&opts.cwd).unwrap_or_default();
+    let no_skills = opts.no_skills || settings.no_skills.unwrap_or(false);
+    let loader = ResourceLoader::from_settings_and_cli(
+        opts.cwd.clone(),
+        None,
+        &settings,
+        opts.cli_skill_paths.clone(),
+        no_skills,
+    );
+    let LoadSkillsResult {
+        skills,
+        diagnostics,
+    } = loader.skills().clone();
+
+    // Explicit override wins, matching TS behaviour.
+    let prompt = if let Some(override_prompt) = opts
+        .system_prompt_override
+        .clone()
+        .or_else(|| settings.system_prompt.clone())
+    {
+        override_prompt
+    } else {
+        let mut builder = SystemPromptBuilder::new()
+            .with_cwd(&opts.cwd)
+            .with_os_info(&opts.os_info)
+            .with_agents_md_from(&opts.cwd)
+            .with_date(opts.include_date)
+            .with_skills(skills.iter().cloned());
+        if let Some(custom) = &opts.custom_instructions {
+            builder = builder.with_custom_instructions(custom.clone());
+        }
+        builder.tool_lines = opts.tool_lines.clone();
+        builder.build()
+    };
+
+    ComposedPrompt {
+        prompt,
+        skills,
+        diagnostics,
+    }
+}
+
+/// Cheap helper: describe the current host OS in the form the
+/// system prompt expects. Kept here so CLI and TUI format it the
+/// same way.
+pub fn describe_host_os() -> String {
+    format!(
+        "{} ({}/{})",
+        std::env::consts::OS,
+        std::env::consts::FAMILY,
+        std::env::consts::ARCH,
+    )
 }
 
 /// The always-emitted preamble. Kept terse so it doesn't dominate

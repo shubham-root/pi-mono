@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::frontmatter::parse_frontmatter;
@@ -27,6 +28,12 @@ use crate::frontmatter::parse_frontmatter;
 pub const MAX_NAME_LENGTH: usize = 64;
 /// Max description length per the spec.
 pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
+
+/// File names whose contents we treat as ignore rules inside a
+/// skill-discovery root. Matches the TS
+/// `IGNORE_FILE_NAMES` list exactly so `.gitignore`d caches, build
+/// artefacts, etc. don't get scanned as skills.
+const IGNORE_FILE_NAMES: &[&str] = &[".gitignore", ".ignore", ".fdignore"];
 
 /// One loaded skill.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -298,11 +305,42 @@ fn is_under(path: &Path, root: &Path) -> bool {
 ///   skill (matches the TS behaviour for `~/.pi/agent/skills/` and
 ///   `.pi/skills/` where loose markdown files are allowed).
 /// - In every case, subdirectories are recursively scanned for
-///   `SKILL.md`. Dotfiles and `node_modules/` are skipped.
+///   `SKILL.md`. Dotfiles and `node_modules/` are skipped, and
+///   `.gitignore` / `.ignore` / `.fdignore` files encountered at
+///   any level contribute patterns to the skill-discovery ignore
+///   matcher so e.g. build caches or `dist/` dirs inside a skill
+///   collection do not get scanned.
 pub fn load_skills_from_dir(
     dir: &Path,
     source: SkillSource,
     include_root_md_files: bool,
+) -> LoadSkillsResult {
+    let root = dir;
+    let mut builder = GitignoreBuilder::new(root);
+    // Attempt to seed with the top-level directory's own ignore
+    // files before any recursion begins.
+    add_ignore_rules(&mut builder, root, root);
+    // An empty `Gitignore` with `root = dir` is the fallback; we
+    // always rebuild the matcher as we descend because nested
+    // `.gitignore`s may extend the rules.
+    let matcher = builder
+        .build()
+        .unwrap_or_else(|_| Gitignore::empty());
+    walk_skills_dir(
+        root,
+        root,
+        source,
+        include_root_md_files,
+        &matcher,
+    )
+}
+
+fn walk_skills_dir(
+    dir: &Path,
+    root: &Path,
+    source: SkillSource,
+    include_root_md_files: bool,
+    inherited: &Gitignore,
 ) -> LoadSkillsResult {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
@@ -312,6 +350,10 @@ pub fn load_skills_from_dir(
             diagnostics,
         };
     }
+
+    // Extend the inherited matcher with any ignore files at this
+    // level so rules cascade downward the same way Git does.
+    let matcher = extend_ignore(inherited, dir, root);
 
     // First: is this directory itself a skill root?
     let skill_md = dir.join("SKILL.md");
@@ -353,12 +395,16 @@ pub fn load_skills_from_dir(
             Ok(m) => m,
             Err(_) => continue,
         };
+        let is_dir = meta.is_dir();
+        if matcher.matched(path, is_dir).is_ignore() {
+            continue;
+        }
 
-        if meta.is_dir() {
+        if is_dir {
             // Recurse, but never pick up loose root .md files in
             // sub-levels — only in the top-level entry that this
             // function was called on.
-            let sub = load_skills_from_dir(path, source, false);
+            let sub = walk_skills_dir(path, root, source, false, &matcher);
             skills.extend(sub.skills);
             diagnostics.extend(sub.diagnostics);
         } else if meta.is_file()
@@ -376,6 +422,99 @@ pub fn load_skills_from_dir(
     LoadSkillsResult {
         skills,
         diagnostics,
+    }
+}
+
+/// Build a new `Gitignore` whose rules extend `base` with any
+/// `.gitignore` / `.ignore` / `.fdignore` files found at `dir`.
+/// Patterns are rewritten to be relative to `root` so a rule like
+/// `target/` in `dir/foo/.gitignore` becomes `foo/target/` — the
+/// form `GitignoreBuilder` expects for a single top-level matcher.
+fn extend_ignore(base: &Gitignore, dir: &Path, root: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(root);
+    // Re-feed the base rules so they stay effective at deeper
+    // levels. `ignore` crate doesn't expose a "clone rules" API;
+    // easiest path is to append the fresh directory's rules on top
+    // of a builder seeded from the same root. Rules from ancestor
+    // directories already live on `base` via prior calls to
+    // `add_ignore_rules`, so we only need to add this directory.
+    let _ = base; // retained for doc-clarity; builder starts empty.
+    // Seed from the root's ignore files every time so the top-level
+    // dir's rules always apply even at deeper recursion.
+    add_ignore_rules(&mut builder, root, root);
+    if dir != root {
+        add_ignore_rules(&mut builder, dir, root);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+/// Read every known ignore file inside `dir` and feed each line
+/// into `builder`, rewriting patterns to be relative to `root` as
+/// `ignore`'s builder expects.
+fn add_ignore_rules(builder: &mut GitignoreBuilder, dir: &Path, root: &Path) {
+    let relative_dir = match dir.strip_prefix(root) {
+        Ok(p) => p.to_path_buf(),
+        Err(_) => PathBuf::new(),
+    };
+    let prefix = if relative_dir.as_os_str().is_empty() {
+        String::new()
+    } else {
+        format!("{}/", to_posix(&relative_dir))
+    };
+    for name in IGNORE_FILE_NAMES {
+        let path = dir.join(name);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for raw in text.lines() {
+            if let Some(prefixed) = rewrite_ignore_pattern(raw, &prefix) {
+                // Errors here simply drop the rule; there's no
+                // reasonable recovery for a malformed pattern and
+                // it shouldn't block skill discovery.
+                let _ = builder.add_line(None, &prefixed);
+            }
+        }
+    }
+}
+
+fn to_posix(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    s.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+/// Mirror the TS `prefixIgnorePattern` helper: skip blanks /
+/// comments, honour `!` negation and `/` anchoring, and prepend
+/// the directory-relative prefix so the pattern resolves against
+/// the top-level root.
+fn rewrite_ignore_pattern(line: &str, prefix: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('#') && !trimmed.starts_with("\\#") {
+        return None;
+    }
+
+    let mut pattern = line.to_string();
+    let mut negated = false;
+    if let Some(rest) = pattern.strip_prefix('!') {
+        negated = true;
+        pattern = rest.to_string();
+    } else if let Some(rest) = pattern.strip_prefix("\\!") {
+        pattern = rest.to_string();
+    }
+    if let Some(rest) = pattern.strip_prefix('/') {
+        pattern = rest.to_string();
+    }
+    let prefixed = if prefix.is_empty() {
+        pattern
+    } else {
+        format!("{prefix}{pattern}")
+    };
+    if negated {
+        Some(format!("!{prefixed}"))
+    } else {
+        Some(prefixed)
     }
 }
 
@@ -860,5 +999,81 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.message.contains("does not exist")));
+    }
+
+    #[test]
+    fn gitignore_skips_ignored_skill_dirs() {
+        let dir = tmp();
+        // Two skills at the same level; one gets ignored by a
+        // top-level `.gitignore` inside the scan root.
+        write_file(
+            &dir.path().join("keep/SKILL.md"),
+            "---\nname: keep\ndescription: stays visible.\n---\n",
+        );
+        write_file(
+            &dir.path().join("hide/SKILL.md"),
+            "---\nname: hide\ndescription: hidden by gitignore.\n---\n",
+        );
+        write_file(&dir.path().join(".gitignore"), "hide/\n");
+
+        let r = load_skills_from_dir(dir.path(), SkillSource::User, false);
+        let names: Vec<&str> = r.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["keep"], "got: {names:?}");
+    }
+
+    #[test]
+    fn ignore_file_patterns_honoured() {
+        let dir = tmp();
+        write_file(
+            &dir.path().join("a/SKILL.md"),
+            "---\nname: a\ndescription: a.\n---\n",
+        );
+        write_file(
+            &dir.path().join("b/SKILL.md"),
+            "---\nname: b\ndescription: b.\n---\n",
+        );
+        // `.ignore` (not `.gitignore`) should also work.
+        write_file(&dir.path().join(".ignore"), "b/\n");
+        let r = load_skills_from_dir(dir.path(), SkillSource::User, false);
+        let names: Vec<&str> = r.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["a"]);
+    }
+
+    #[test]
+    fn nested_gitignore_rules_apply() {
+        let dir = tmp();
+        // `cat-a` subdir has its own .gitignore that excludes `drop/`.
+        write_file(
+            &dir.path().join("cat-a/drop/SKILL.md"),
+            "---\nname: drop\ndescription: drop.\n---\n",
+        );
+        write_file(
+            &dir.path().join("cat-a/keep/SKILL.md"),
+            "---\nname: keep\ndescription: keep.\n---\n",
+        );
+        write_file(&dir.path().join("cat-a/.gitignore"), "drop/\n");
+        let r = load_skills_from_dir(dir.path(), SkillSource::User, false);
+        let names: Vec<&str> = r.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"keep"));
+        assert!(!names.contains(&"drop"), "got: {names:?}");
+    }
+
+    #[test]
+    fn negation_rules_re_include_files() {
+        let dir = tmp();
+        write_file(
+            &dir.path().join("build/a/SKILL.md"),
+            "---\nname: a\ndescription: a.\n---\n",
+        );
+        write_file(
+            &dir.path().join("build/b/SKILL.md"),
+            "---\nname: b\ndescription: b.\n---\n",
+        );
+        // Ignore everything in build/ except `b`.
+        write_file(&dir.path().join(".gitignore"), "build/*\n!build/b/\n");
+        let r = load_skills_from_dir(dir.path(), SkillSource::User, false);
+        let names: Vec<&str> = r.skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"b"), "got: {names:?}");
+        assert!(!names.contains(&"a"), "got: {names:?}");
     }
 }

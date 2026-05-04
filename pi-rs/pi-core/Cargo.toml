@@ -39,6 +39,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # TOML configuration
 toml = "0.8"
 
+# gitignore-style matching for skill/resource discovery.
+# Honours `.gitignore`, `.ignore`, and `.fdignore` the same way
+# ripgrep does. Used by `pi-core::skills`.
+ignore = "0.4"
+
 # Prometheus-style metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
