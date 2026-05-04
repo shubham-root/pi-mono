@@ -1,0 +1,17 @@
+[package]
+name = "pi-plugin-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Wire types shared between pi-plugin-host and pi-plugin-sdk (+ other language SDKs)."
+license = "MIT"
+
+# This crate is intentionally dependency-light so the same types can
+# be compiled to wasm32-wasip2 for plugin SDKs and to the host target
+# for pi-plugin-host. Do not add anything that is not `no_std`
+# friendly in spirit (we still use std here for convenience, but no
+# async runtimes, no IO, no wasmtime).
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

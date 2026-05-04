@@ -1,0 +1,17 @@
+name = "hello"
+version = "0.1.0"
+description = "Greets the user when any agent loop begins."
+entry = "pi_plugin_hello.wasm"
+
+permissions = ["ui"]
+events = ["agent_start"]
+
+[limits]
+memory_bytes = 33554432     # 32MB
+fuel = 1_000_000_000        # 1B instructions per call
+call_timeout_ms = 30000
+
+[fault]
+policy = "disable"
+max_faults = 3
+fault_window_secs = 60

@@ -14,20 +14,24 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
-# WASM runtime
-wasmtime = { version = "18.0", features = ["runtime", "component-model"] }
+# Protocol types shared with the plugin SDK.
+pi-plugin-protocol = { path = "../pi-plugin-protocol" }
+
+# Manifest parsing.
+toml = "0.8"
+
+# WASM runtime.
+wasmtime = { version = "18.0", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "parallel-compilation",
+    "wat",
+] }
 wasmtime-wasi = "18.0"
 
-# Protobuf
-prost = "0.13"
-prost-types = "0.13"
+# Utilities.
 bytes = "1.0"
 
-# Plugin SDK
-pi-plugin-sdk = { path = "../pi-plugin-sdk" }
-
-# Tokio
-tokio-util = "0.7"
-
-[build-dependencies]
-prost-build = "0.13"
+[dev-dependencies]
+tempfile = "3.10"
+wat = "1.0"

@@ -2,25 +2,17 @@
 name = "pi-plugin-sdk"
 version = "0.1.0"
 edition = "2024"
-description = "SDK for building pi-rs plugins in Rust"
+description = "Rust SDK for building pi-rs plugins. Compile to wasm32-wasip2."
 license = "MIT"
 
+[lib]
+# The plugin itself is usually a `cdylib` crate; this SDK is a plain
+# library that plugins depend on.
+crate-type = ["rlib"]
+
 [dependencies]
-# Workspace
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
-
-# WASM
-wasm-bindgen = "0.2"
-wasmtime = "18.0"
-
-# Tokio utilities
-tokio-util = "0.7"
-
-# Plugin SDK proc-macro (local)
-# This would be a separate crate in real implementation
+pi-plugin-protocol = { path = "../pi-plugin-protocol" }
 
 [dev-dependencies]
-tempfile = "3.10"

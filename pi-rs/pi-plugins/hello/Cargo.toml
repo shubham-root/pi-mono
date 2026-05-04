@@ -1,0 +1,13 @@
+[package]
+name = "pi-plugin-hello"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Example: greets the user when any agent loop begins."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pi-plugin-sdk = { path = "../../pi-plugin-sdk" }
+serde_json.workspace = true

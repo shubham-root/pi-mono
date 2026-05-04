@@ -8,7 +8,9 @@ members = [
     "pi-modes",
     "pi-tui",
     "pi-plugin-host",
+    "pi-plugin-protocol",
     "pi-plugin-sdk",
+    "pi-plugins/hello",
     "pi-server",
 ]
 
