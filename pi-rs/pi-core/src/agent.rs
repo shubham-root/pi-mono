@@ -517,9 +517,26 @@ impl Agent {
             // Execute each tool call sequentially, emitting results as
             // they arrive so the UI can render them before the next turn
             // kicks off.
+            //
+            // Critical invariant: every `tool_use` block in the assistant
+            // message MUST be paired with a matching `tool_result` in
+            // the history. Anthropic (both direct and via Bedrock)
+            // rejects the next turn with
+            //   `tool_use` ids were found without `tool_result` blocks
+            //    immediately after
+            // if we drop the pairing. So when a tool's own `execute`
+            // fails (path escape, permission denied, panic caught by
+            // anyhow, etc.) we synthesize an error-flagged tool result
+            // and keep going. The model sees the error text and can
+            // recover; the next request's message shape stays valid.
             for tc in collected_tool_calls {
-                let result_str = self.execute_tool(&tc).await?;
-                let is_error = result_str.starts_with("[ERROR]");
+                let (result_str, is_error) = match self.execute_tool(&tc).await {
+                    Ok(s) => {
+                        let is_err = s.starts_with("[ERROR]");
+                        (s, is_err)
+                    }
+                    Err(e) => (format!("[ERROR] {e}"), true),
+                };
                 let _ = tx.send(AgentEvent::ToolCallResult {
                     id: tc.id.clone(),
                     output: result_str.clone(),

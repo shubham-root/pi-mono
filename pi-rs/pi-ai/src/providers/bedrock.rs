@@ -925,6 +925,59 @@ mod tests {
     }
 
     #[test]
+    fn errored_tool_result_stays_paired_with_tool_use() {
+        // Regression for the class of bugs where a failing tool call
+        // (path escape, permission denied, provider returned Err)
+        // leaves an orphan `tool_use` in history and makes the next
+        // turn fail with Bedrock's
+        //   `tool_use` ids were found without `tool_result` blocks
+        //    immediately after
+        // error. The agent's inner loop now synthesizes an
+        // error-flagged `Message::Tool` for every failing tool so
+        // the pairing stays intact; this test guards the shape.
+        let messages = vec![
+            Message::User(vec![Content::Text {
+                text: "write to forbidden path".into(),
+                cache_control: None,
+            }]),
+            Message::Assistant(vec![Content::ToolUse {
+                id: "t_write_fail".into(),
+                name: "write".into(),
+                input: serde_json::json!({"file": "/etc/passwd"}),
+                cache_control: None,
+            }]),
+            Message::Tool {
+                tool_use_id: "t_write_fail".into(),
+                content: vec![Content::Text {
+                    text: "[ERROR] Access denied: path outside working directory"
+                        .into(),
+                    cache_control: None,
+                }],
+                is_error: Some(true),
+            },
+        ];
+        let converted = convert_messages(&messages);
+        assert_eq!(converted.len(), 3);
+        let tool_use_id = match &converted[1].content[0] {
+            BedrockContent::ToolUse { tool_use } => tool_use.tool_use_id.as_str(),
+            other => panic!("expected ToolUse, got {other:?}"),
+        };
+        match &converted[2].content[0] {
+            BedrockContent::ToolResult { tool_result } => {
+                assert_eq!(tool_result.tool_use_id, tool_use_id);
+                assert_eq!(tool_result.status, "error");
+                match &tool_result.content[0] {
+                    BedrockToolResultContent::Text { text } => {
+                        assert!(text.contains("Access denied"));
+                    }
+                    other => panic!("expected Text content, got {other:?}"),
+                }
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn single_tool_result_stays_a_single_user_message() {
         let messages = vec![
             Message::User(vec![Content::Text {
