@@ -41,7 +41,7 @@ fn get_all_slash_commands() -> Vec<SlashCommand> {
         SlashCommand { name: "session".to_string(), description: "Show session info".to_string() },
         SlashCommand { name: "resume".to_string(), description: "Resume a saved session".to_string() },
         SlashCommand { name: "fork".to_string(), description: "Fork session".to_string() },
-        SlashCommand { name: "export".to_string(), description: "Export to HTML file".to_string() },
+        SlashCommand { name: "export".to_string(), description: "Export to file (format from extension: .html, .md, .jsonl)".to_string() },
         SlashCommand { name: "share".to_string(), description: "Share as GitHub gist".to_string() },
         SlashCommand { name: "compact".to_string(), description: "Manual context compaction".to_string() },
         SlashCommand { name: "pin".to_string(), description: "Pin current model to this project (.pi/config.toml)".to_string() },
@@ -1053,8 +1053,24 @@ impl InteractiveMode {
             // ENTER: select from palette, select model/setting, or send message
             KeyCommand::Enter => {
                 if self.palette_active {
-                    // Select command from palette
-                    if !self.palette_items.is_empty() {
+                    // The palette text is whatever comes after the
+                    // leading `/`. If it carries a space (e.g.
+                    // `/export notes.md`), the user is passing
+                    // arguments — run their literal typed command
+                    // instead of whatever happens to be selected
+                    // in the narrowed-down list. Otherwise pick the
+                    // selection as before.
+                    let typed = self
+                        .editor
+                        .text()
+                        .trim_start_matches('/')
+                        .to_string();
+                    let has_args = typed.split_whitespace().count() > 1;
+                    if has_args {
+                        self.close_palette();
+                        self.execute_command(&typed).await?;
+                        self.editor.clear();
+                    } else if !self.palette_items.is_empty() {
                         let cmd_name = self.palette_items[self.palette_selected].name.clone();
                         self.close_palette();
                         self.execute_command(&cmd_name).await?;
@@ -1867,7 +1883,16 @@ impl InteractiveMode {
     }
 
     async fn execute_command(&mut self, name: &str) -> Result<()> {
-        match name {
+        // Split the first whitespace run so commands with arguments
+        // (`/export jsonl`, `/skill:foo hello there`) work the same
+        // way through palette selection and manual typing. Without
+        // this, `name` arrives as `"export jsonl"` and every arm
+        // except `_` misses.
+        let (cmd, args) = match name.split_once(char::is_whitespace) {
+            Some((head, tail)) => (head.trim(), tail.trim()),
+            None => (name, ""),
+        };
+        match cmd {
             "help" | "hotkeys" => {
                 self.status = "Enter: send | Alt+Enter: queue | Esc: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+I: tools | Ctrl+C x2: quit".to_string();
             }
@@ -2012,12 +2037,91 @@ impl InteractiveMode {
                 self.status = "Pick thinking level + budget. Enter to apply, Esc to cancel.".to_string();
             }
             "export" => {
-                let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-                let path = std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(format!("pi-session-{ts}.html"));
-                match export_conversation_html(&self.messages, &path) {
-                    Ok(()) => {
+                // `/export [path]` — filename infers the format.
+                //   `.html`           -> rich styled page (default if no arg)
+                //   `.md` / `.markdown` -> same markdown as /share
+                //   `.jsonl` / `.json`  -> raw session entries (copied from
+                //                          the live session file when it
+                //                          exists, otherwise rebuilt from
+                //                          in-memory messages)
+                //
+                // Relative paths resolve against the current working
+                // directory; `~` expands against the user's home dir so
+                // `/export ~/pi.html` works. Missing parent dirs are
+                // created. The auto-generated default lands as
+                // `pi-session-<ts>.html` in cwd so the old behaviour
+                // (no arg) is preserved byte-for-byte.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let arg = args.trim();
+                let target: PathBuf = if arg.is_empty() {
+                    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+                    cwd.join(format!("pi-session-{ts}.html"))
+                } else {
+                    let expanded = pi_core::resource_loader::expand_user(arg);
+                    if expanded.is_absolute() {
+                        expanded
+                    } else {
+                        cwd.join(expanded)
+                    }
+                };
+
+                let ext = target
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let result = match ext.as_str() {
+                    "html" | "htm" => {
+                        export_conversation_html(&self.messages, &target).map(|()| target.clone())
+                    }
+                    "md" | "markdown" => {
+                        if let Some(parent) = target.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let md = conversation_to_markdown(&self.messages);
+                        fs::write(&target, md)
+                            .map(|()| target.clone())
+                            .map_err(anyhow::Error::from)
+                    }
+                    "jsonl" | "json" => {
+                        if let Some(parent) = target.parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        // Prefer the live session file on disk when
+                        // one exists — it carries the definitive entry
+                        // stream (including metadata + branch
+                        // summaries). Fall back to rebuilding the
+                        // JSONL from `self.messages` for sessions
+                        // that were never persisted (rare; the TUI
+                        // auto-creates one on startup).
+                        match self
+                            .current_session
+                            .as_ref()
+                            .and_then(|s| s.file_path().map(|p| p.to_path_buf()))
+                        {
+                            Some(src) if src.is_file() => fs::copy(&src, &target)
+                                .map(|_| target.clone())
+                                .map_err(anyhow::Error::from),
+                            _ => write_messages_as_jsonl(&self.messages, &target)
+                                .map(|()| target.clone()),
+                        }
+                    }
+                    "" => {
+                        self.status = format!(
+                            "Export: no extension on '{}'. Use .html, .md, or .jsonl.",
+                            target.display()
+                        );
+                        return Ok(());
+                    }
+                    other => {
+                        self.status = format!(
+                            "Export: unknown extension '.{other}'. Supported: .html, .md, .jsonl"
+                        );
+                        return Ok(());
+                    }
+                };
+                match result {
+                    Ok(path) => {
                         self.status = format!("Exported → {}", path.display());
                     }
                     Err(e) => {
@@ -4692,6 +4796,56 @@ fn compact_summary(messages: &[ConversationMessage]) -> String {
     )
 }
 
+/// Serialize the in-memory conversation as JSONL — one JSON object
+/// per line. Matches the shape the agent writes to
+/// `~/.pi/sessions/.../<uuid>.jsonl` when a live session is attached,
+/// but only uses data available on `ConversationMessage` so it works
+/// even for sessions that were never persisted (pre-session-startup
+/// conversations). First line is a header with timestamp + message
+/// count; subsequent lines are entries keyed by role.
+fn write_messages_as_jsonl(messages: &[ConversationMessage], path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut body = String::new();
+    let header = serde_json::json!({
+        "type": "header",
+        "created": chrono::Local::now().to_rfc3339(),
+        "message_count": messages.len(),
+        "source": "pi-export",
+    });
+    body.push_str(&serde_json::to_string(&header)?);
+    body.push('\n');
+    for m in messages {
+        let tool_calls: Vec<serde_json::Value> = m
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input_preview": tc.input_preview,
+                    "input_raw": tc.input_raw,
+                    "output": tc.output,
+                    "is_error": tc.is_error,
+                })
+            })
+            .collect();
+        let entry = serde_json::json!({
+            "type": "message",
+            "role": m.role,
+            "content": m.content,
+            "thinking": m.thinking,
+            "tool_calls": tool_calls,
+            "streaming": m.streaming,
+        });
+        body.push_str(&serde_json::to_string(&entry)?);
+        body.push('\n');
+    }
+    fs::write(path, body)?;
+    Ok(())
+}
+
 fn save_transcript_json(messages: &[ConversationMessage], path: &Path, model: &str) -> Result<()> {
     let msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -5189,6 +5343,41 @@ mod tests {
             "user content must be escaped, body: {html}"
         );
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn jsonl_writer_emits_header_plus_one_line_per_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.jsonl");
+        let messages = vec![
+            msg_user("hi"),
+            msg_tool_call("ls", ".", Some("file.txt"), false),
+            msg_assistant("Here you go."),
+        ];
+        write_messages_as_jsonl(&messages, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // 1 header line + 3 message lines.
+        assert_eq!(lines.len(), 4, "lines: {lines:?}");
+        // Each line parses as its own JSON object.
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|e| panic!("bad line {line:?}: {e}"));
+        }
+        let header: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(header["type"], "header");
+        assert_eq!(header["message_count"], 3);
+        assert_eq!(header["source"], "pi-export");
+
+        let first_msg: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first_msg["type"], "message");
+        assert_eq!(first_msg["role"], "user");
+        assert_eq!(first_msg["content"], "hi");
+
+        let tool_msg: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+        assert_eq!(tool_msg["role"], "assistant");
+        assert_eq!(tool_msg["tool_calls"][0]["name"], "ls");
+        assert_eq!(tool_msg["tool_calls"][0]["output"], "file.txt");
     }
 
     #[test]
