@@ -32,7 +32,7 @@ cargo test --workspace
 cargo build --release
 
 # Run the CLI
-cargo run --bin pi -- --help
+cargo run --bin piz -- --help
 ```
 
 ## CI

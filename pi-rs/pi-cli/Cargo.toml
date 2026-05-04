@@ -6,7 +6,7 @@ description = "CLI entry point for pi-rs"
 license = "MIT"
 
 [[bin]]
-name = "pi"
+name = "piz"
 path = "src/main.rs"
 
 [dependencies]

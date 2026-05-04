@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 /// Main CLI arguments.
 #[derive(Parser, Debug, Clone)]
-#[clap(name = "pi-rs")]
+#[clap(name = "piz")]
 #[clap(about = "pi - AI coding agent")]
 #[clap(long_about = None)]
 #[clap(version)]
