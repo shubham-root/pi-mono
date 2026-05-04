@@ -4193,76 +4193,316 @@ fn html_escape(s: &str) -> String {
 }
 
 fn export_conversation_html(messages: &[ConversationMessage], path: &Path) -> Result<()> {
+    use pulldown_cmark::{html as md_html, Options, Parser};
+
+    fn render_markdown(src: &str) -> String {
+        let mut opts = Options::empty();
+        opts.insert(Options::ENABLE_STRIKETHROUGH);
+        opts.insert(Options::ENABLE_TABLES);
+        opts.insert(Options::ENABLE_TASKLISTS);
+        opts.insert(Options::ENABLE_FOOTNOTES);
+        let parser = Parser::new_ext(src, opts);
+        let mut out = String::new();
+        md_html::push_html(&mut out, parser);
+        out
+    }
+
     let mut body = String::new();
+    let mut user_count = 0usize;
+    let mut assistant_count = 0usize;
+    let mut tool_count = 0usize;
+
     for m in messages {
         let role_class = match m.role.as_str() {
-            "user" => "user",
-            "assistant" => "assistant",
+            "user" => {
+                user_count += 1;
+                "user"
+            }
+            "assistant" => {
+                assistant_count += 1;
+                "assistant"
+            }
+            "error" => "error",
             _ => "system",
         };
-        body.push_str(&format!("<section class=\"msg {role_class}\">\n"));
+        body.push_str(&format!("<section class=\"msg msg-{role_class}\">\n"));
+        let role_label = match m.role.as_str() {
+            "user" => "You",
+            "assistant" => "Assistant",
+            "error" => "Error",
+            other => other,
+        };
         body.push_str(&format!(
-            "<header class=\"role\">{}</header>\n",
-            html_escape(&m.role)
+            "<div class=\"role-label\">{}</div>\n",
+            html_escape(role_label)
         ));
+
         if !m.thinking.is_empty() {
             body.push_str(&format!(
-                "<details class=\"thinking\"><summary>thinking</summary><pre>{}</pre></details>\n",
-                html_escape(&m.thinking)
+                "<details class=\"thinking\"><summary>Thinking</summary><div class=\"thinking-body\">{}</div></details>\n",
+                render_markdown(&m.thinking)
             ));
         }
+
         for tc in &m.tool_calls {
-            body.push_str("<div class=\"tool\">\n");
+            tool_count += 1;
+            let status_class = match (&tc.output, tc.is_error) {
+                (None, _) => "tool-pending",
+                (Some(_), false) => "tool-success",
+                (Some(_), true) => "tool-error",
+            };
+            let icon = match (&tc.output, tc.is_error) {
+                (None, _) => "○",
+                (Some(_), false) => "✓",
+                (Some(_), true) => "✗",
+            };
             body.push_str(&format!(
-                "<div class=\"tool-name\">{}</div>\n",
-                html_escape(&tc.name)
+                "<details class=\"tool {status_class}\">\n<summary><span class=\"tool-icon\">{icon}</span> <span class=\"tool-name\">{}</span> <span class=\"tool-preview\">{}</span></summary>\n",
+                html_escape(&tc.name),
+                html_escape(&tc.input_preview),
             ));
-            body.push_str(&format!(
-                "<pre class=\"tool-args\">{}</pre>\n",
-                html_escape(&tc.input_preview)
-            ));
+            if let Some(raw) = tc.input_raw.as_ref() {
+                // `input_raw` is already a parsed `serde_json::Value`;
+                // pretty-print for readability and fall back to
+                // `Debug` if pretty-printing the value fails for any
+                // reason.
+                let pretty = serde_json::to_string_pretty(raw)
+                    .unwrap_or_else(|_| format!("{raw:?}"));
+                body.push_str(&format!(
+                    "<div class=\"tool-args\"><div class=\"tool-section\">arguments</div><pre><code>{}</code></pre></div>\n",
+                    html_escape(&pretty)
+                ));
+            }
             if let Some(out) = &tc.output {
                 body.push_str(&format!(
-                    "<pre class=\"tool-out\">{}</pre>\n",
+                    "<div class=\"tool-out\"><div class=\"tool-section\">output</div><pre><code>{}</code></pre></div>\n",
                     html_escape(out)
                 ));
             }
-            body.push_str("</div>\n");
+            body.push_str("</details>\n");
         }
+
         if !m.content.is_empty() {
-            body.push_str(&format!(
-                "<div class=\"content\"><pre>{}</pre></div>\n",
-                html_escape(&m.content)
-            ));
+            if m.role == "assistant" {
+                body.push_str(&format!(
+                    "<div class=\"content\">{}</div>\n",
+                    render_markdown(&m.content)
+                ));
+            } else {
+                // User / error rows render as plain text so any
+                // accidental markdown-looking syntax in a user
+                // message stays verbatim.
+                body.push_str(&format!(
+                    "<div class=\"content plain\"><pre>{}</pre></div>\n",
+                    html_escape(&m.content)
+                ));
+            }
         }
         body.push_str("</section>\n");
     }
+
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // CSS mirrors the TUI's sectional-background design: same
+    // background hexes for user / assistant / tool-success /
+    // tool-error blocks so the exported HTML reads like the
+    // terminal session it came from.
+    let css = r#"
+:root {
+  --bg: #18181e;
+  --panel-bg: #1e1e24;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --border: #30363d;
+  --link: #81a2be;
+  --user-bg: #343541;
+  --assistant-accent: #79c0ff;
+  --tool-pending-bg: #282832;
+  --tool-success-bg: #283228;
+  --tool-error-bg: #3c2828;
+  --code-bg: #161b22;
+  --code-fg: #e6edf3;
+  --cyan: #8abeb7;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--text); }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14.5px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+}
+.container { max-width: 980px; margin: 0 auto; }
+header.page {
+  color: var(--muted);
+  font-size: .85rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  align-items: baseline;
+}
+header.page h1 { font-size: 1.1rem; margin: 0; color: var(--text); }
+header.page .meta { color: var(--muted); }
+.msg {
+  padding: .75rem 1rem;
+  margin: .5rem 0;
+  border-radius: 6px;
+}
+.msg-user { background: var(--user-bg); }
+.msg-assistant { background: transparent; }
+.msg-error { background: var(--tool-error-bg); color: #ff9a9a; }
+.role-label {
+  font-size: .7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--assistant-accent);
+  margin-bottom: .4rem;
+}
+.msg-user .role-label { color: var(--cyan); }
+.msg-error .role-label { color: #ff6b6b; }
+.content { color: var(--text); }
+.content.plain pre {
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
+}
+.content p { margin: .4rem 0; }
+.content h1, .content h2, .content h3 { margin: 1rem 0 .5rem; color: #f0c674; }
+.content h1 { font-size: 1.3rem; }
+.content h2 { font-size: 1.15rem; }
+.content h3 { font-size: 1rem; }
+.content a { color: var(--link); text-decoration: none; border-bottom: 1px dotted var(--link); }
+.content a:hover { text-decoration: underline; }
+.content code {
+  background: var(--code-bg);
+  color: var(--cyan);
+  padding: .1em .35em;
+  border-radius: 4px;
+  font-size: .92em;
+  font-family: 'SF Mono', 'Menlo', 'Cascadia Mono', monospace;
+}
+.content pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: .8rem 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: .88em;
+  line-height: 1.5;
+}
+.content pre code { background: none; padding: 0; color: inherit; }
+.content ul, .content ol { padding-left: 1.5rem; margin: .4rem 0; }
+.content blockquote {
+  border-left: 3px solid var(--border);
+  margin: .5rem 0;
+  padding: .25rem 1rem;
+  color: var(--muted);
+}
+.content table {
+  border-collapse: collapse;
+  margin: .5rem 0;
+}
+.content th, .content td {
+  border: 1px solid var(--border);
+  padding: .35rem .6rem;
+}
+.content th { background: rgba(255,255,255,.04); }
+.tool {
+  margin: .5rem 0;
+  border-radius: 6px;
+  padding: .5rem .75rem;
+  border: 1px solid transparent;
+}
+.tool-pending { background: var(--tool-pending-bg); border-color: #3a3a44; }
+.tool-success { background: var(--tool-success-bg); border-color: #3a5238; }
+.tool-error { background: var(--tool-error-bg); border-color: #6a3a3a; }
+.tool summary {
+  cursor: pointer;
+  font-size: .92rem;
+  user-select: none;
+}
+.tool summary::marker, .tool summary::-webkit-details-marker { color: var(--muted); }
+.tool-icon { font-weight: bold; }
+.tool-pending .tool-icon { color: #ffdc66; }
+.tool-success .tool-icon { color: #7ee787; }
+.tool-error .tool-icon { color: #ff6b6b; }
+.tool-name { font-weight: 600; color: var(--cyan); margin-left: .25rem; }
+.tool-preview { color: var(--muted); margin-left: .25rem; }
+.tool-args, .tool-out { margin-top: .6rem; }
+.tool-section {
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+  margin-bottom: .25rem;
+}
+.tool-args pre, .tool-out pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: .6rem .75rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: .82em;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.thinking {
+  margin: .5rem 0;
+  padding: .4rem .75rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+  font-size: .9rem;
+}
+.thinking summary { cursor: pointer; font-style: italic; user-select: none; }
+.thinking-body { margin-top: .5rem; }
+"#;
+
+    let model_id = messages
+        .iter()
+        .find_map(|m| {
+            if m.role == "assistant" && !m.thinking.is_empty() {
+                None
+            } else {
+                None::<String>
+            }
+        })
+        .unwrap_or_default();
+    let _ = model_id; // placeholder — we don't thread model id into
+                      // ConversationMessage today; follow-up.
+
     let html = format!(
         r#"<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pi session {ts}</title>
-<style>
-body {{ font-family: -apple-system, system-ui, sans-serif; background: #0e1116; color: #e6edf3; padding: 1.5rem; max-width: 980px; margin: auto; }}
-.msg {{ border-top: 1px solid #30363d; padding: 1rem 0; }}
-.msg.user {{ background: rgba(128,200,255,0.05); }}
-.msg.assistant {{ background: rgba(128,255,200,0.03); }}
-.role {{ font-weight: 600; color: #79c0ff; margin-bottom: .5rem; text-transform: uppercase; font-size: .75rem; letter-spacing: .05em; }}
-pre {{ background: #161b22; padding: .75rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }}
-.tool-name {{ font-weight: 600; color: #7ee787; }}
-.tool-args {{ color: #d2a8ff; }}
-.tool-out {{ color: #c9d1d9; }}
-.thinking {{ color: #8b949e; }}
-header.page {{ color: #8b949e; font-size: .85rem; margin-bottom: 1rem; }}
-</style>
+<style>{css}</style>
 </head><body>
-<header class="page">pi session — {ts} — {count} message(s)</header>
+<div class="container">
+<header class="page">
+  <h1>pi session</h1>
+  <span class="meta">{ts}</span>
+  <span class="meta">{count} message(s) · {user_count} from you · {assistant_count} assistant · {tool_count} tool call(s)</span>
+</header>
 {body}
+</div>
 </body></html>
 "#,
         ts = ts,
+        css = css,
         count = messages.len(),
+        user_count = user_count,
+        assistant_count = assistant_count,
+        tool_count = tool_count,
         body = body,
     );
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
@@ -4326,12 +4566,28 @@ fn share_via_gh_gist(messages: &[ConversationMessage]) -> Result<String> {
 
 fn conversation_to_markdown(messages: &[ConversationMessage]) -> String {
     let mut out = String::new();
+    let mut user_count = 0usize;
+    let mut assistant_count = 0usize;
+    let mut tool_count = 0usize;
+    for m in messages {
+        match m.role.as_str() {
+            "user" => user_count += 1,
+            "assistant" => assistant_count += 1,
+            _ => {}
+        }
+        tool_count += m.tool_calls.len();
+    }
+
     out.push_str("# pi session\n\n");
     out.push_str(&format!(
-        "_{} \u{2022} {} message(s)_\n\n",
+        "_{} · {} message(s) · {} from you · {} assistant · {} tool call(s)_\n\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         messages.len(),
+        user_count,
+        assistant_count,
+        tool_count,
     ));
+
     for m in messages {
         let header = match m.role.as_str() {
             "user" => "## You".to_string(),
@@ -4342,28 +4598,53 @@ fn conversation_to_markdown(messages: &[ConversationMessage]) -> String {
         };
         out.push_str(&header);
         out.push_str("\n\n");
+
         if !m.thinking.is_empty() {
-            out.push_str("<details><summary>thinking</summary>\n\n```\n");
+            out.push_str("<details><summary>Thinking</summary>\n\n");
             out.push_str(&m.thinking);
-            out.push_str("\n```\n\n</details>\n\n");
+            if !m.thinking.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("\n</details>\n\n");
         }
+
         for tc in &m.tool_calls {
+            let icon = match (&tc.output, tc.is_error) {
+                (None, _) => "○",
+                (Some(_), false) => "✓",
+                (Some(_), true) => "✗",
+            };
             out.push_str(&format!(
-                "**tool → {}** `{}`\n\n",
+                "<details><summary>{icon} <b>{}</b> — <code>{}</code></summary>\n\n",
                 tc.name, tc.input_preview
             ));
+            if let Some(raw) = tc.input_raw.as_ref() {
+                let pretty = serde_json::to_string_pretty(raw)
+                    .unwrap_or_else(|_| format!("{raw:?}"));
+                out.push_str("**arguments**\n\n```json\n");
+                out.push_str(&pretty);
+                if !pretty.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("```\n\n");
+            }
             if let Some(o) = &tc.output {
-                out.push_str("```\n");
+                out.push_str("**output**\n\n```\n");
                 out.push_str(o);
                 if !o.ends_with('\n') {
                     out.push('\n');
                 }
                 out.push_str("```\n\n");
             }
+            out.push_str("</details>\n\n");
         }
+
         if !m.content.is_empty() {
             out.push_str(&m.content);
-            out.push_str("\n\n");
+            if !m.content.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
         }
     }
     out
@@ -4819,6 +5100,119 @@ fn active_model_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn msg_user(text: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "user".into(),
+            content: text.into(),
+            ..Default::default()
+        }
+    }
+
+    fn msg_assistant(text: &str) -> ConversationMessage {
+        ConversationMessage {
+            role: "assistant".into(),
+            content: text.into(),
+            ..Default::default()
+        }
+    }
+
+    fn msg_tool_call(
+        name: &str,
+        preview: &str,
+        output: Option<&str>,
+        is_error: bool,
+    ) -> ConversationMessage {
+        ConversationMessage {
+            role: "assistant".into(),
+            tool_calls: vec![ConversationToolCall {
+                id: format!("call_{name}"),
+                name: name.into(),
+                input_preview: preview.into(),
+                input_raw: Some(serde_json::json!({"path": "."})),
+                output: output.map(|s| s.to_string()),
+                is_error,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn export_html_renders_assistant_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.html");
+        let messages = vec![
+            msg_user("hello"),
+            msg_assistant("# Heading\n\nParagraph with **bold** and `code`."),
+        ];
+        export_conversation_html(&messages, &path).unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        // Markdown rendered: heading + <strong> + <code>, not raw.
+        assert!(html.contains("<h1>Heading</h1>"), "heading: {html}");
+        assert!(html.contains("<strong>bold</strong>"), "bold: {html}");
+        assert!(html.contains("<code>code</code>"), "code: {html}");
+        // Sectional bg classes present.
+        assert!(html.contains("msg-user"));
+        assert!(html.contains("msg-assistant"));
+    }
+
+    #[test]
+    fn export_html_wraps_tool_calls_in_details_with_status_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.html");
+        let messages = vec![
+            msg_user("run ls"),
+            msg_tool_call("ls", ".", Some("a.txt\nb.txt"), false),
+            msg_tool_call("read", "missing", None, false),
+            msg_tool_call("bash", "false", Some("error"), true),
+        ];
+        export_conversation_html(&messages, &path).unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(html.contains("<details class=\"tool tool-success\">"));
+        assert!(html.contains("<details class=\"tool tool-pending\">"));
+        assert!(html.contains("<details class=\"tool tool-error\">"));
+        // Tool output wrapped in its own <pre> inside the details.
+        assert!(html.contains("a.txt\nb.txt"));
+        // Counts in header.
+        assert!(html.contains("3 tool call(s)"));
+    }
+
+    #[test]
+    fn export_html_escapes_user_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.html");
+        let messages = vec![msg_user("<script>alert(1)</script>")];
+        export_conversation_html(&messages, &path).unwrap();
+        let html = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !html.contains("<script>alert(1)"),
+            "user content must be escaped, body: {html}"
+        );
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn conversation_markdown_has_counts_and_collapsed_tool_blocks() {
+        // Two assistant rows — one with the tool call, one with the
+        // final reply — matches the natural flow of a tool-using
+        // turn in pi.
+        let messages = vec![
+            msg_user("run ls"),
+            msg_tool_call("ls", ".", Some("a.txt"), false),
+            msg_assistant("Here you go."),
+        ];
+        let md = conversation_to_markdown(&messages);
+        assert!(md.starts_with("# pi session"));
+        assert!(md.contains("1 from you"));
+        assert!(md.contains("2 assistant"));
+        assert!(md.contains("1 tool call(s)"));
+        assert!(md.contains("<details><summary>"));
+        assert!(md.contains("✓ <b>ls</b>"));
+        assert!(md.contains("**arguments**"));
+        assert!(md.contains("**output**"));
+        assert!(md.contains("a.txt"));
+        assert!(md.contains("Here you go."));
+    }
 
     #[test]
     fn format_tokens_matches_typescript_thresholds() {
