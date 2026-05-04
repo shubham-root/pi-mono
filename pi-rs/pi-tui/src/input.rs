@@ -47,6 +47,7 @@ pub enum KeyCommand {
     CtrlC,
     CtrlD,
     CtrlE,
+    CtrlI,
     CtrlJ,
     CtrlK,
     CtrlL,
@@ -176,6 +177,13 @@ pub fn parse_key_event(event: KeyEvent) -> KeyCommand {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => KeyCommand::CtrlC,
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => KeyCommand::CtrlD,
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => KeyCommand::CtrlE,
+        // Ctrl+I only fires as its own command on terminals that
+        // implement the Kitty keyboard protocol (disambiguate
+        // escape codes). On classic terminals the byte 0x09 is
+        // returned for both Ctrl+I and Tab, so crossterm yields
+        // `KeyCode::Tab` there and this arm never matches — Tab
+        // semantics are preserved.
+        (KeyCode::Char('i'), KeyModifiers::CONTROL) => KeyCommand::CtrlI,
         (KeyCode::Char('j'), KeyModifiers::CONTROL) => KeyCommand::CtrlJ,
         (KeyCode::Char('k'), KeyModifiers::CONTROL) => KeyCommand::CtrlK,
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => KeyCommand::CtrlL,

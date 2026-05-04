@@ -4,7 +4,7 @@
 //! - Escape to cancel
 //! - Ctrl+L for model selector
 //! - Ctrl+T for thinking toggle
-//! - Ctrl+O for tool output toggle
+//! - Ctrl+I toggles tool output (first 5 lines vs full)
 //! - Ctrl+C to clear, Ctrl+C twice to quit
 //! - / to open command palette
 
@@ -1592,9 +1592,18 @@ impl InteractiveMode {
                 self.status = format!("Thinking: {}", if self.show_thinking { "ON" } else { "OFF" });
                 Ok(true)
             }
-            KeyCommand::CtrlO => {
+            KeyCommand::CtrlI | KeyCommand::CtrlO => {
+                // Ctrl+I is the preferred binding (matches the rest
+                // of pi's keymap, and doesn't collide with the
+                // letter O used for "open"). Ctrl+O stays wired as a
+                // fallback for terminals that don't speak the Kitty
+                // keyboard protocol (there Ctrl+I decodes as Tab,
+                // not as a Ctrl combo, so we can't rely on it).
                 self.show_tools = !self.show_tools;
-                self.status = format!("Tool output: {}", if self.show_tools { "ON" } else { "OFF" });
+                self.status = format!(
+                    "Tool output: {} (press ctrl+i to toggle)",
+                    if self.show_tools { "ALL" } else { "FIRST 5 LINES" }
+                );
                 Ok(true)
             }
 
@@ -1892,7 +1901,7 @@ impl InteractiveMode {
     async fn execute_command(&mut self, name: &str) -> Result<()> {
         match name {
             "help" | "hotkeys" => {
-                self.status = "Enter: send | Alt+Enter: queue | Esc: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+O: tools | Ctrl+C x2: quit".to_string();
+                self.status = "Enter: send | Alt+Enter: queue | Esc: cancel | Ctrl+L: models | Ctrl+T: thinking | Ctrl+I: tools | Ctrl+C x2: quit".to_string();
             }
             "model" => {
                 self.display_mode = DisplayMode::ModelList;
@@ -2965,7 +2974,7 @@ fn accent_style() -> Style {
 /// Structure (each line a separate Line):
 ///   pi v<version>                                 ← accent + dim
 ///   escape interrupt · ctrl+c/ctrl+d clear/exit · …  ← key hints joined by muted ·
-///   Press ctrl+o to show full startup help …       ← dim
+///   Press ctrl+i to show full startup help …       ← dim
 ///   (blank)
 ///   Pi can explain its own features and look up …  ← dim
 fn render_startup_banner() -> Vec<Line<'static>> {
@@ -3004,13 +3013,13 @@ fn render_startup_banner() -> Vec<Line<'static>> {
         Span::raw(" "),
         desc("model"),
         sep(),
-        key("ctrl+o"),
+        key("ctrl+i"),
         Span::raw(" "),
         desc("more"),
     ]);
 
     let press_more = Line::from(Span::styled(
-        "Press ctrl+o to show full startup help and loaded resources.".to_string(),
+        "Press ctrl+i to show full startup help and loaded resources.".to_string(),
         dim_style(),
     ));
 
@@ -3050,7 +3059,7 @@ fn render_messages(
             // Error rows get a dedicated red-tinted style so provider
             // / tool failures are visually distinct from normal
             // assistant output.
-            let bg = Style::default().bg(Color::Indexed(52));
+            let bg = Style::default().bg(Color::Rgb(0x3c, 0x28, 0x28));
             let prefix_style = bg
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD);
@@ -3073,26 +3082,24 @@ fn render_messages(
         }
 
         if msg.role == "user" {
-            // Match the TS user-message visual: cyan bold prefix, text in
-            // the default color with a subtle › divider. A full-width
-            // background tint would need the frame width threaded into
-            // the renderer; we keep it visually distinct via prefix
-            // color alone, which also plays nicer with copy/paste out
-            // of the terminal.
-            let prefix_style = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD);
+            // Match the TS user-message visual: tinted background
+            // (`userMsgBg` = #343541) with a bold cyan "You›"
+            // prefix. The background tint is the primary signal
+            // that visually separates user input from assistant
+            // output in a scrollback full of markdown.
+            let bg = Style::default().bg(Color::Rgb(0x34, 0x35, 0x41));
+            let prefix_style = bg.fg(Color::Cyan).add_modifier(Modifier::BOLD);
             for (i, text_line) in msg.content.lines().enumerate() {
                 if i == 0 {
                     lines.push(Line::from(vec![
-                        Span::styled("You".to_string(), prefix_style),
-                        Span::styled(" \u{203a} ".to_string(), muted_style()),
-                        Span::raw(text_line.to_string()),
+                        Span::styled(" You ".to_string(), prefix_style),
+                        Span::styled("› ".to_string(), bg.fg(Color::Gray)),
+                        Span::styled(text_line.to_string(), bg),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
-                        Span::raw("    ".to_string()),
-                        Span::raw(text_line.to_string()),
+                        Span::styled("     ".to_string(), bg),
+                        Span::styled(text_line.to_string(), bg),
                     ]));
                 }
             }
@@ -3123,14 +3130,28 @@ fn render_messages(
         }
 
         for call in &msg.tool_calls {
-            // Background shades mirror the TS theme:
-            //   pending -> `toolPendingBg` (#282832) → Indexed(236)
-            //   success -> `toolSuccessBg` (#283228) → Indexed(22)
-            //   error   -> `toolErrorBg`   (#3c2828) → Indexed(52)
+            // Exact background hexes mirror the TS `dark.json`
+            // theme so the Rust variant visually matches the
+            // TypeScript one pixel-for-pixel:
+            //   pending -> `toolPendingBg` #282832
+            //   success -> `toolSuccessBg` #283228
+            //   error   -> `toolErrorBg`   #3c2828
             let (icon, icon_style, bg_color) = match (&call.output, call.is_error) {
-                (None, _) => ("○", Style::default().fg(Color::Yellow), Color::Indexed(236)),
-                (Some(_), false) => ("✓", Style::default().fg(Color::Green), Color::Indexed(22)),
-                (Some(_), true) => ("✗", Style::default().fg(Color::Red), Color::Indexed(52)),
+                (None, _) => (
+                    "○",
+                    Style::default().fg(Color::Yellow),
+                    Color::Rgb(0x28, 0x28, 0x32),
+                ),
+                (Some(_), false) => (
+                    "✓",
+                    Style::default().fg(Color::Green),
+                    Color::Rgb(0x28, 0x32, 0x28),
+                ),
+                (Some(_), true) => (
+                    "✗",
+                    Style::default().fg(Color::Red),
+                    Color::Rgb(0x3c, 0x28, 0x28),
+                ),
             };
             let bg = Style::default().bg(bg_color);
             let header = Line::from(vec![
@@ -3144,7 +3165,7 @@ fn render_messages(
             ]);
             lines.push(header);
             // Tool-specific structured preview (edit -> mini-diff, write
-            // -> content preview). Shown regardless of Ctrl+O because
+            // -> content preview). Shown regardless of Ctrl+I because
             // it's the main signal that the tool call will do something
             // destructive.
             if let Some(raw) = call.input_raw.as_ref() {
@@ -3153,40 +3174,38 @@ fn render_messages(
                 }
             }
             if show_tools {
+                // Expanded: dump the whole output, line by line,
+                // still with the tinted background row extending
+                // across the terminal.
                 if let Some(output) = &call.output {
-                    let preview_max_lines = 20usize;
-                    let mut shown = 0;
-                    for out_line in output.lines().take(preview_max_lines) {
+                    for out_line in output.lines() {
                         lines.push(Line::from(vec![
                             Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
                             Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
                         ]));
-                        shown += 1;
-                    }
-                    let total = output.lines().count();
-                    if total > preview_max_lines {
-                        lines.push(Line::from(Span::styled(
-                            format!("  │ … {} more line(s) (ctrl+o to toggle)", total - shown),
-                            bg.fg(Color::DarkGray),
-                        )));
                     }
                 }
-            } else if call.output.is_some() {
-                let first_line = call
-                    .output
-                    .as_deref()
-                    .and_then(|s| s.lines().next())
-                    .unwrap_or("")
-                    .chars()
-                    .take(80)
-                    .collect::<String>();
-                if !first_line.is_empty() {
+            } else if let Some(output) = &call.output {
+                // Collapsed: binary `first 5 lines -> all` toggle.
+                // Matches the TS renderer: show up to 5 rows of the
+                // real output, then a single dim hint row on
+                // overflow. No 80-char truncation.
+                const COLLAPSED_LINES: usize = 5;
+                let mut shown = 0;
+                for out_line in output.lines().take(COLLAPSED_LINES) {
                     lines.push(Line::from(vec![
                         Span::styled("  │ ".to_string(), bg.fg(Color::Gray)),
-                        Span::styled(first_line, bg.fg(Color::Gray)),
+                        Span::styled(out_line.to_string(), bg.fg(Color::Gray)),
                     ]));
+                    shown += 1;
+                }
+                let total = output.lines().count();
+                if total > shown {
                     lines.push(Line::from(Span::styled(
-                        "  │ (ctrl+o to expand)".to_string(),
+                        format!(
+                            "  │ … {} more line(s) · ctrl+i for full output",
+                            total - shown
+                        ),
                         bg.fg(Color::DarkGray),
                     )));
                 }
