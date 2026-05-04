@@ -199,8 +199,9 @@ struct BedrockUsage {
 
 fn convert_messages(messages: &[Message]) -> Vec<BedrockMessage> {
     let mut out = Vec::new();
-    for msg in messages {
-        match msg {
+    let mut i = 0;
+    while i < messages.len() {
+        match &messages[i] {
             Message::User(blocks) => {
                 let content = user_blocks_to_bedrock(blocks);
                 if !content.is_empty() {
@@ -209,6 +210,7 @@ fn convert_messages(messages: &[Message]) -> Vec<BedrockMessage> {
                         content,
                     });
                 }
+                i += 1;
             }
             Message::Assistant(blocks) => {
                 let content = assistant_blocks_to_bedrock(blocks);
@@ -218,34 +220,55 @@ fn convert_messages(messages: &[Message]) -> Vec<BedrockMessage> {
                         content,
                     });
                 }
+                i += 1;
             }
-            Message::Tool {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                let text = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        Content::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                // Bedrock expects tool results as a user-role message with a
-                // toolResult content block linked back to the original
-                // toolUseId. Status is "success" by default; "error" when
-                // the caller flagged the result as an error.
-                out.push(BedrockMessage {
-                    role: "user",
-                    content: vec![BedrockContent::ToolResult {
-                        tool_result: BedrockToolResultBlock {
-                            tool_use_id: tool_use_id.clone(),
-                            content: vec![BedrockToolResultContent::Text { text }],
-                            status: if is_error.unwrap_or(false) { "error" } else { "success" },
-                        },
-                    }],
-                });
+            Message::Tool { .. } => {
+                // Bedrock requires every tool result from a single
+                // assistant turn to live in ONE user message whose
+                // toolResult-block count matches the preceding
+                // assistant message's toolUse count. The agent loop
+                // pushes each `Message::Tool` separately, so we
+                // look ahead to absorb every consecutive
+                // `Message::Tool` into a single Bedrock user
+                // message before moving on.
+                let mut blocks: Vec<BedrockContent> = Vec::new();
+                while i < messages.len() {
+                    match &messages[i] {
+                        Message::Tool {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
+                            let text = content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    Content::Text { text, .. } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            blocks.push(BedrockContent::ToolResult {
+                                tool_result: BedrockToolResultBlock {
+                                    tool_use_id: tool_use_id.clone(),
+                                    content: vec![BedrockToolResultContent::Text { text }],
+                                    status: if is_error.unwrap_or(false) {
+                                        "error"
+                                    } else {
+                                        "success"
+                                    },
+                                },
+                            });
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                if !blocks.is_empty() {
+                    out.push(BedrockMessage {
+                        role: "user",
+                        content: blocks,
+                    });
+                }
             }
         }
     }
@@ -827,6 +850,153 @@ fn decode_bedrock_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_tool_results_merge_into_one_user_message() {
+        // When the assistant emits two tool_uses in one turn, the
+        // agent loop pushes two `Message::Tool` entries. Bedrock
+        // requires both tool results to live in a SINGLE user
+        // message so the toolResult-block count matches the
+        // preceding assistant's toolUse-block count. Regression
+        // guard for "The number of toolResult blocks at
+        // messages.N.content exceeds the number of toolUse
+        // blocks of previous turn."
+        let messages = vec![
+            Message::User(vec![Content::Text {
+                text: "hi".into(),
+                cache_control: None,
+            }]),
+            Message::Assistant(vec![
+                Content::ToolUse {
+                    id: "t1".into(),
+                    name: "ls".into(),
+                    input: serde_json::json!({}),
+                    cache_control: None,
+                },
+                Content::ToolUse {
+                    id: "t2".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "/x"}),
+                    cache_control: None,
+                },
+            ]),
+            Message::Tool {
+                tool_use_id: "t1".into(),
+                content: vec![Content::Text {
+                    text: "a\nb".into(),
+                    cache_control: None,
+                }],
+                is_error: Some(false),
+            },
+            Message::Tool {
+                tool_use_id: "t2".into(),
+                content: vec![Content::Text {
+                    text: "contents".into(),
+                    cache_control: None,
+                }],
+                is_error: Some(false),
+            },
+        ];
+        let converted = convert_messages(&messages);
+        assert_eq!(
+            converted.len(),
+            3,
+            "expected 3 Bedrock messages (user, assistant, user); got {}",
+            converted.len()
+        );
+        // Final user message must carry BOTH toolResult blocks.
+        let last = &converted[2];
+        assert_eq!(last.role, "user");
+        assert_eq!(
+            last.content.len(),
+            2,
+            "tool results must merge into a single user message, got {} blocks",
+            last.content.len()
+        );
+        let ids: Vec<&str> = last
+            .content
+            .iter()
+            .map(|b| match b {
+                BedrockContent::ToolResult { tool_result } => tool_result.tool_use_id.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(ids, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn single_tool_result_stays_a_single_user_message() {
+        let messages = vec![
+            Message::User(vec![Content::Text {
+                text: "hi".into(),
+                cache_control: None,
+            }]),
+            Message::Assistant(vec![Content::ToolUse {
+                id: "t1".into(),
+                name: "ls".into(),
+                input: serde_json::json!({}),
+                cache_control: None,
+            }]),
+            Message::Tool {
+                tool_use_id: "t1".into(),
+                content: vec![Content::Text {
+                    text: "a".into(),
+                    cache_control: None,
+                }],
+                is_error: Some(false),
+            },
+        ];
+        let converted = convert_messages(&messages);
+        assert_eq!(converted.len(), 3);
+        assert_eq!(converted[2].content.len(), 1);
+    }
+
+    #[test]
+    fn non_adjacent_tool_messages_do_not_merge() {
+        // A Tool, then a user text, then another Tool should NOT
+        // collapse across the user text — they belong to different
+        // turns.
+        let messages = vec![
+            Message::Tool {
+                tool_use_id: "t1".into(),
+                content: vec![Content::Text {
+                    text: "a".into(),
+                    cache_control: None,
+                }],
+                is_error: Some(false),
+            },
+            Message::User(vec![Content::Text {
+                text: "between".into(),
+                cache_control: None,
+            }]),
+            Message::Tool {
+                tool_use_id: "t2".into(),
+                content: vec![Content::Text {
+                    text: "b".into(),
+                    cache_control: None,
+                }],
+                is_error: Some(false),
+            },
+        ];
+        let converted = convert_messages(&messages);
+        assert_eq!(converted.len(), 3);
+        // First user msg is the tool result block, second is the
+        // user text, third is the second tool result block.
+        assert_eq!(converted[0].content.len(), 1);
+        assert!(matches!(
+            &converted[0].content[0],
+            BedrockContent::ToolResult { .. }
+        ));
+        assert!(matches!(
+            &converted[1].content[0],
+            BedrockContent::Text { .. }
+        ));
+        assert_eq!(converted[2].content.len(), 1);
+        assert!(matches!(
+            &converted[2].content[0],
+            BedrockContent::ToolResult { .. }
+        ));
+    }
 
     #[test]
     fn serialize_text_content_has_no_type_discriminator() {
