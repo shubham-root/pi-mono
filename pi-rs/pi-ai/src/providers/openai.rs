@@ -155,6 +155,48 @@ struct OpenAIUsage {
     total_tokens: u32,
 }
 
+/// Bring a tool-call id into the character set / length range
+/// every OpenAI-compatible backend accepts. Rules:
+///
+/// - OpenAI Responses API (which OpenRouter sometimes routes to for
+///   Azure-hosted models) caps `call_id` at 64 chars and enforces
+///   `[a-zA-Z0-9_-]`. Anything longer triggers `string_above_max_length`;
+///   anything with `|`, `+`, `/`, `=` (as the OpenAI Codex / Responses
+///   pipe format often does) can be silently dropped during
+///   translation and surface as "No tool call found for function call
+///   output with call_id X".
+/// - Pipe-separated `call_abc|<long base64>` ids collapse to the
+///   `call_abc` portion, matching the TS `normalizeToolCallId`
+///   helper in `packages/ai/src/providers/openai-completions.ts`.
+/// - Everything else is truncated to 40 chars to stay inside even
+///   the strictest Chat Completions implementations.
+///
+/// Sanitization always swaps disallowed characters for `_` so two
+/// different upstream ids can't accidentally collapse onto the same
+/// normalized id (it keeps the original run length).
+fn normalize_tool_call_id(id: &str) -> String {
+    let base = if let Some((head, _)) = id.split_once('|') {
+        head
+    } else {
+        id
+    };
+    let sanitized: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.chars().count() > 40 {
+        sanitized.chars().take(40).collect()
+    } else {
+        sanitized
+    }
+}
+
 fn build_request(
     model: &Model,
     context: &Context,
@@ -172,6 +214,37 @@ fn build_request(
     // Conversation messages. Keep tool_use / tool_result blocks intact so
     // the model sees its own previous tool calls and their results; without
     // this the agent loops forever until `Max turns exceeded`.
+    // Normalize tool-call ids once, up-front. OpenAI-compatible
+    // providers (and crucially some of the backends OpenRouter
+    // reaches, like Azure Responses API) enforce a 64-char cap on
+    // `call_id` and a `[a-zA-Z0-9_-]` charset. Upstream tool-call
+    // ids sometimes blow past both — e.g. OpenAI Responses emits
+    // pipe-separated `call_abc|<400+ base64 chars>` ids, Anthropic
+    // uses `toolu_...`, some aggregator-proxied models send
+    // `tooluse_...`. If we echo them back verbatim, Azure rejects
+    // the request with either "string too long" or "no tool call
+    // found for function call output with call_id X" (when the
+    // translation layer drops the malformed id).
+    //
+    // Build the mapping across assistant tool_uses first so the
+    // matching tool_results get rewritten to the same normalized
+    // id — otherwise the pairing breaks. Mirrors the
+    // `normalizeToolCallId` pass in `openai-completions.ts`.
+    let mut id_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for msg in &context.messages {
+        if let crate::types::Message::Assistant(blocks) = msg {
+            for c in blocks {
+                if let Content::ToolUse { id, .. } = c {
+                    let normalized = normalize_tool_call_id(id);
+                    if normalized != *id {
+                        id_map.insert(id.clone(), normalized);
+                    }
+                }
+            }
+        }
+    }
+
     for msg in &context.messages {
         match msg {
             crate::types::Message::User(blocks) => {
@@ -194,8 +267,12 @@ fn build_request(
                         Content::ToolUse {
                             id, name, input, ..
                         } => {
+                            let resolved_id = id_map
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| id.clone());
                             tool_calls.push(OpenAIAssistantToolCall {
-                                id: id.clone(),
+                                id: resolved_id,
                                 kind: "function",
                                 function: OpenAIAssistantFunctionCall {
                                     name: name.clone(),
@@ -244,7 +321,10 @@ fn build_request(
                     .collect::<Vec<_>>()
                     .join("\n");
                 openai_messages.push(OpenAIMessage::Tool {
-                    tool_call_id: tool_use_id.clone(),
+                    tool_call_id: id_map
+                        .get(tool_use_id)
+                        .cloned()
+                        .unwrap_or_else(|| tool_use_id.clone()),
                     content: text,
                 });
             }
@@ -586,6 +666,128 @@ pub async fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_tool_call_id_passes_short_clean_ids_through() {
+        assert_eq!(normalize_tool_call_id("call_abc123"), "call_abc123");
+        assert_eq!(
+            normalize_tool_call_id("tooluse_d8WN6xC4dw54X9Mig4xHlA"),
+            "tooluse_d8WN6xC4dw54X9Mig4xHlA"
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_truncates_to_40_chars() {
+        let long_id = "call_".to_string() + &"x".repeat(80);
+        let normalized = normalize_tool_call_id(&long_id);
+        assert_eq!(normalized.len(), 40);
+        assert!(normalized.starts_with("call_"));
+    }
+
+    #[test]
+    fn normalize_tool_call_id_splits_pipe_separated_responses_ids() {
+        // OpenAI Responses / Codex / opencode emit ids like
+        // `call_abc123|fc_longbase64+/=stuff`. Azure via
+        // OpenRouter only accepts the pre-pipe part.
+        let input = "call_Bv123|fc_LongBase64Chars+=xyz/abc_ABCdef";
+        let normalized = normalize_tool_call_id(input);
+        assert_eq!(normalized, "call_Bv123");
+    }
+
+    #[test]
+    fn normalize_tool_call_id_sanitizes_disallowed_chars() {
+        let input = "call+slash/eq=";
+        assert_eq!(normalize_tool_call_id(input), "call_slash_eq_");
+    }
+
+    #[test]
+    fn normalize_tool_call_id_handles_over_limit_pipe_tail() {
+        // 71-char id that Azure explicitly rejects (reproduced
+        // against the live OpenRouter endpoint):
+        //   `Invalid 'input[1].call_id': string too long.
+        //    Expected a string with maximum length 64, but got
+        //    a string with length 71 instead.`
+        let input = "call_abc123|fc_x6LsomethingVeryLongWithBase64chars+=abc/xyz123456789abc";
+        let normalized = normalize_tool_call_id(input);
+        assert_eq!(normalized, "call_abc123");
+    }
+
+    #[test]
+    fn build_request_rewrites_long_tool_call_ids_on_the_wire() {
+        // End-to-end guard: a 71-char pipe-separated id on the
+        // assistant's tool_use AND the matching tool result must
+        // both render as the same short normalized id in the
+        // serialized request body. Without this, OpenRouter /
+        // Azure return 400 with either
+        // `string_above_max_length` or
+        // `No tool call found for function call output with call_id X`.
+        let long = "call_abc123|fc_x6LsomethingVeryLongWithBase64chars+=abc/xyz123456789abc";
+        let model = Model {
+            id: "openai/gpt-5".into(),
+            name: "gpt-5".into(),
+            api: crate::types::Api::OpenAiCompletions,
+            provider: crate::types::Provider::OpenRouter,
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            reasoning: false,
+            cost: None,
+            context_window: None,
+            max_tokens: None,
+            compat: None,
+            multimodal: None,
+        };
+        let ctx = crate::types::Context {
+            system_prompt: None,
+            messages: vec![
+                crate::types::Message::User(vec![crate::types::Content::Text {
+                    text: "!ls".into(),
+                    cache_control: None,
+                }]),
+                crate::types::Message::Assistant(vec![crate::types::Content::ToolUse {
+                    id: long.to_string(),
+                    name: "ls".into(),
+                    input: serde_json::json!({}),
+                    cache_control: None,
+                }]),
+                crate::types::Message::Tool {
+                    tool_use_id: long.to_string(),
+                    content: vec![crate::types::Content::Text {
+                        text: "file.txt".into(),
+                        cache_control: None,
+                    }],
+                    is_error: Some(false),
+                },
+            ],
+            tools: None,
+        };
+        let options = crate::types::StreamOptions {
+            temperature: None,
+            max_tokens: None,
+            signal: None,
+            api_key: Some("test".into()),
+            transport: None,
+            cache_retention: None,
+            session_id: None,
+            headers: None,
+            reasoning_effort: None,
+            thinking_budgets: None,
+        };
+        let req = build_request(&model, &ctx, &options).unwrap();
+        let json = serde_json::to_string(&req).unwrap();
+        let normalized = normalize_tool_call_id(long);
+        assert_eq!(normalized, "call_abc123");
+        assert!(
+            !json.contains(long),
+            "expected long id to be stripped, body: {json}"
+        );
+        // Both the assistant's tool_calls[].id and the tool
+        // message's tool_call_id must use the same normalized id.
+        let target = format!("\"{normalized}\"");
+        let occurrences = json.matches(&target).count();
+        assert!(
+            occurrences >= 2,
+            "expected 2 occurrences of normalized id {target}, got {occurrences} in body: {json}"
+        );
+    }
 
     #[tokio::test]
     async fn test_build_request() {
